@@ -1,0 +1,20 @@
+[project]
+name = "reversed-prompts"
+version = "0.0.0"
+description = "Recover the prompt that maps a set of inputs to their outputs"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.40",
+]
+
+[project.optional-dependencies]
+# Only needed to regenerate data/corpus/*.md from source PDFs.
+ingest = ["pymupdf>=1.24"]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "network: test performs a real API call and costs money (deselected by default)",
+]

@@ -178,10 +178,11 @@ Two scoring guards that matter more than the metrics themselves:
   other, prefer the shortest and most general. Directly counters underdetermination.
 
 **Judge independence.** Never let the same model both propose and judge in the same round
-— you optimize toward the judge's quirks. Routing through OpenRouter (§7) makes the
-strong version of this cheap: use a judge from a **different model family** than the
-inducer, which is a slug change rather than a second vendor integration. Keep real weight
-on Tier 1 deterministic signal, and calibrate against a small human-labeled set
+— you optimize toward the judge's quirks. On a single-vendor stack (§7) the strong version
+of this — a judge from a **different model family** — is not available without a second
+integration, so the weaker version has to carry more: a different model *tier* as judge
+than as inducer, and correspondingly more weight on Tier 1 deterministic signal. This is
+the one real cost of going OpenAI-only; see §7. Calibrate against a small human-labeled set
 periodically. Report judge–human agreement as a first-class metric; if it drifts, the
 whole optimization is measuring noise.
 
@@ -260,74 +261,66 @@ Recommendation first, rationale second, honest alternative third.
 | Schemas | **Pydantic v2** | `PromptSpec` is the system's spine; validation and JSON round-trip are load-bearing. |
 | Orchestration | **LangGraph** | Cyclic + stateful + checkpointable + interruptible matches §4 exactly. *Keep the optimizer core framework-free* so you can drop it. Alt: plain asyncio state machine — genuinely viable, less magic. |
 | CLI | **Typer** | The loop is batch/offline; CLI-first is correct. |
-| Model access | **OpenRouter** via `openai` client or **LiteLLM** | One key, one client, cross-family judge for free, per-generation cost accounting. Caveats in §7 Models — provider pinning is mandatory. |
+| Model access | **OpenAI API** via the `openai` client | One vendor, one key, chat + embeddings + a batch API from the same integration. Judge-independence caveat in §7 Models. |
 
-### Models — via OpenRouter
+### Models — via the OpenAI API
 
-All model calls go through **OpenRouter**, using the `openai` Python client pointed at
-`https://openrouter.ai/api/v1` (the API is OpenAI-compatible), or **LiteLLM** if you want
-provider-agnostic retries and cost accounting for free. LiteLLM is already a DSPy
-dependency, so it is in the tree either way — `dspy.LM("openrouter/<slug>")` works
-directly.
-
-Wrap it in a thin internal `LLMClient` protocol regardless. The optimization loop should
-depend on *roles*, not slugs; swapping a role's model is then a config change, and role
-assignment is itself something you will tune once you see the cost profile.
+All model calls go through the **OpenAI API** using the official `openai` Python client
+and a single `OPENAI_API_KEY`. Wrap it in a thin internal `LLMClient` protocol anyway. The
+optimization loop should depend on *roles*, not model IDs; swapping a role's model is then
+a config change, and role assignment is itself something you will tune once you see the
+cost profile. The protocol is also the seam where a second vendor gets added later if the
+judge slot justifies it — keep it narrow enough that adding one is a new implementation,
+not a refactor.
 
 | Role | Wants | Rationale |
 |---|---|---|
 | Inducer / optimizer | Frontier reasoning model | Few calls, hardest reasoning: hypothesize + textual gradients. Quality here dominates outcome; cost is negligible. |
-| Executor | Strong mid-tier | Many calls — runs every candidate over every eval doc. **The cost center**; this is the slot where OpenRouter's model shopping pays for itself. |
-| Feature extraction / Tier-2 | Cheap + fast, reliable JSON | High-volume, structural. Verify the slug advertises structured-output support. |
-| Judge | **Different family from the inducer** | Independence (§4.4) — see below. |
+| Executor | Strong mid-tier | Many calls — runs every candidate over every eval doc. **The cost center**; the slot to tune first when the bill hurts. |
+| Feature extraction / Tier-2 | Cheap + fast, reliable structured output | High-volume, structural. Use the structured-output mode, not prose parsing. |
+| Judge | **Different model tier from the inducer** | Independence (§4.4) — weaker than cross-family, see below. |
 
-OpenRouter slugs are `provider/model` (e.g. `anthropic/claude-opus-5`,
-`openai/gpt-…`, `google/gemini-…`). **Resolve exact slugs at runtime from
-`GET /api/v1/models` rather than hardcoding them** — the catalog moves, and the same
-endpoint returns each model's `supported_parameters` and pricing, which the client can
-use to fail fast when a role is assigned a model that can't do structured output.
+Resolve model IDs from config, not hardcoded literals scattered through the code, and
+treat a role's model as part of the run trace: **scores from different models are not
+comparable**, so a model change re-baselines the run.
 
-**What OpenRouter buys this project specifically:** genuine judge independence. §4.4 wants
-the judge to be a different model family from the proposer, which normally means a second
-vendor integration; here it is a slug change. Take advantage of it — a cross-family judge
-is materially harder to game than a same-family one. Built-in cost accounting per
-generation also makes the §9 budget controls easy to enforce for real rather than
-estimating from token counts.
+#### What the single-vendor stack costs, and what it buys
 
-#### Provider pinning is mandatory here (not optional tuning)
+**The cost is judge independence.** §4.4 wants the judge to be a different model family
+from the proposer, because a same-family judge shares the failure modes the optimizer is
+searching against. On OpenAI-only, the best available approximation is a different model
+tier, which is a weaker guarantee. Compensate deliberately: keep Tier-1 deterministic
+metrics as the primary signal and the judge as a tiebreaker rather than the arbiter, and
+watch judge–human agreement as a first-class metric (§4.4). If that number drifts, the
+single-family judge is the first thing to suspect. Adding one non-OpenAI model *solely*
+for the judge role is the cheapest fix if it comes to that.
 
-OpenRouter may route the same slug to different upstream providers with different
-quantization, tokenizers, and caching behavior. **For most applications that is a
-feature. For this one it is a correctness bug**, because the entire system is a
-measurement loop: if round 7 scores worse than round 3, you must be certain that is the
-prompt changing and not the serving provider changing underneath you.
+**What it buys, against the OpenRouter alternative:**
 
-- Pin the provider (`provider.order` with `allow_fallbacks: false`) for every model used
-  in scoring. Fallbacks are fine for one-off interactive calls, never inside an eval.
-- Log the **actually-served** provider (returned on each response) into the run trace
-  alongside every score. Treat a provider change as invalidating cross-round comparison.
+- **No provider-routing hazard.** OpenRouter may serve the same slug from different
+  upstream hosts with different quantization and caching. For a measurement loop that is a
+  correctness bug — you can't tell a score change from a serving change. Going direct
+  removes the failure mode entirely, along with the provider-pinning machinery it needed.
+- **The Batch API is back.** ~50% off for asynchronous work with a 24h turnaround. Nearly
+  all evaluation in this system is offline and batchable — this is a real lever on the
+  §9 cost plan, not a rounding error.
+- **Embeddings come from the same vendor.** `text-embedding-3-*` covers the retrieval
+  stack, so it is no longer a mandatory second integration (local embeddings remain the
+  recommended default below, for different reasons).
+- **Automatic prompt caching**, with no per-provider semantics to reason about.
+
+#### Determinism inside the eval loop
+
 - Pin `seed` and `temperature=0` on the executor for eval runs. Neither guarantees
   determinism, which is exactly why the scoring design leans on deterministic Tier-1
   metrics and repeated sampling rather than trusting single generations.
-
-#### Caching and batching: adjust expectations
-
-- **Prompt caching still matters enormously** — the same input documents are resent on
+- **Prompt caching matters enormously here** — the same input documents are resent on
   every candidate evaluation, and this is the difference between a run costing $5 and
-  $200. But semantics are now provider-dependent: Anthropic-served models need explicit
-  `cache_control` breakpoints passed through, OpenAI-served models cache automatically,
-  and some providers do not cache at all. Another reason to pin. Verify cache hits are
-  real by watching the usage fields, not by assuming.
-- **No equivalent of a 50%-discount batch API.** Drop that lever from the cost plan.
-  Replace it with bounded concurrency, aggressive Tier-1 prefiltering (§4.4), and
-  eval-set subsampling until finalists.
-
-#### Embeddings are *not* covered by OpenRouter
-
-OpenRouter serves chat completions; it does not serve embeddings or reranking. The
-retrieval stack below therefore needs its own provider regardless — either a hosted
-embedding API or local models. Budget for that as a separate integration rather than
-discovering it in Phase 2.
+  $200. Caching is automatic, but verify hits are real by watching the usage fields
+  rather than assuming; cache behavior depends on prefix stability, so keep the document
+  at the *front* of the prompt and the varying candidate instruction after it.
+- Log the model ID and token usage next to every score. A model change invalidates
+  cross-round comparison the same way a provider swap would have.
 
 ### Prompt optimization
 - **DSPy** (`MIPROv2`, `BootstrapFewShot`) for instruction + exemplar search. Do not
@@ -345,16 +338,15 @@ fallback for odd formats · `tree-sitter` for code · `pandas` for tabular.
 `LanceDB` (embedded, zero-ops, right for a repo-local tool; move to Qdrant only if you
 need a server) · `bm25s` for lexical · RRF fusion.
 
-**Embeddings and reranking need their own provider — OpenRouter does not serve them.**
-Two viable routes:
+**Embeddings and reranking.** `text-embedding-3-*` is available on the same key, so this
+is no longer a forced second integration. Two viable routes:
 
 - **Local** (`bge-m3` for embeddings, a `sentence-transformers` cross-encoder for rerank).
-  Recommended default: it removes a second API dependency, keeps documents on the box,
-  costs nothing per call, and embedding quality is not the bottleneck here — the
-  alignment step (§4.2) uses retrieval only to generate *candidates* that an LLM then
-  adjudicates.
-- **Hosted** (Voyage, Jina, Cohere) if corpora get large enough that local inference
-  becomes the slow path.
+  Still the recommended default: it keeps documents on the box, costs nothing per call,
+  and embedding quality is not the bottleneck here — the alignment step (§4.2) uses
+  retrieval only to generate *candidates* that an LLM then adjudicates.
+- **Hosted** — `text-embedding-3-large` on the existing key is the path of least
+  resistance; Voyage, Jina or Cohere if reranking quality turns out to matter.
 
 Either way, keep it behind the same kind of thin protocol as the LLM client so the choice
 stays reversible.
@@ -381,9 +373,9 @@ Each phase is independently useful and de-risks the next.
 RAG, no UI. Ingest → hypothesize → Tier-1+3 eval → refine → PromptSpec, driven by CLI.
 Pairs come from `data/pairs/agentic-ai-survey.jsonl` (20 prose pairs over one document;
 see `data/README.md` for provenance and the calibration caveat that follows from it).
-Includes the `LLMClient` protocol over OpenRouter with provider pinning and served-provider
-logging from the first commit — retrofitting that after scores exist means throwing the
-scores away.
+Includes the `LLMClient` protocol over the OpenAI API, with model ID and token usage logged
+next to every score from the first commit — retrofitting that after scores exist means
+throwing the scores away.
 *Exit criterion: on a held-out pair, the induced prompt beats the naive baseline on the
 Tier-1 style/structure metrics.* This slice proves or kills the core thesis for a
 fortnight of work — build it before anything else.
@@ -412,10 +404,10 @@ when new pairs arrive.
 | **Judge/optimizer collusion** | Separate models; weight deterministic tiers; track judge–human agreement as a metric |
 | **Prompt overfits by embedding answers** | Contamination penalty on rare n-grams and entities from training docs |
 | **Unattributable output content** | Alignment detects it, surfaces it, and excludes it from induction (§4.2) |
-| **Cost blowup** — N candidates × M docs × long docs | Cascade eval; prompt caching (verify hits per provider); bounded concurrency; subsample eval set early, full set only for finalists. No batch-API discount available via OpenRouter |
+| **Cost blowup** — N candidates × M docs × long docs | Cascade eval; prompt caching (verify hits in the usage fields); the Batch API for offline eval; bounded concurrency; subsample eval set early, full set only for finalists |
 | **Style is subjective** | Measurable proxies carry Tier 1; the judge only breaks ties among survivors |
-| **Silent provider swap corrupts the score trace** — same slug, different upstream host, different scores | Pin `provider.order` with `allow_fallbacks: false` for all scoring calls; log the served provider next to every score; invalidate cross-round comparison when it changes (§7) |
-| **Model deprecation mid-project** — OpenRouter's catalog moves | Resolve slugs from `/api/v1/models` at runtime, not hardcoded; roles are config; re-baseline scores when a role's model changes, since old and new scores are not comparable |
+| **Same-family judge shares the proposer's blind spots** — the cost of a single-vendor stack | Judge on a different model tier than the inducer; keep Tier-1 deterministic metrics primary and the judge a tiebreaker; track judge–human agreement and add one non-OpenAI model for the judge role alone if it drifts (§4.4, §7) |
+| **Model deprecation mid-project** — snapshots retire | Model IDs live in config, never inline; pin dated snapshots for anything whose scores you intend to compare; re-baseline when a role's model changes, since old and new scores are not comparable |
 
 ---
 
