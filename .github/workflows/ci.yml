@@ -1,0 +1,73 @@
+name: checks
+
+# Manual only. Click "Run workflow" in the Actions tab.
+# `checks` needs no secrets and costs nothing; `api-smoke` spends money and is
+# off unless you tick it.
+on:
+  workflow_dispatch:
+    inputs:
+      run_api_smoke:
+        description: "Also call the OpenAI API (costs money, needs OPENAI_API_KEY)"
+        type: boolean
+        default: false
+      pair:
+        description: "Which pair the smoke test runs"
+        type: choice
+        default: fetch-01
+        options: [fetch-01, fetch-04, summ-01, summ-06, reason-02, reason-07]
+      model:
+        description: "Model id for the smoke test"
+        type: string
+        default: gpt-4.1-mini
+
+jobs:
+  checks:
+    name: data integrity (free)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install -e '.[dev]'
+
+      - name: Run tests
+        run: pytest -v
+
+      - name: Confirm the pair file is not stale
+        run: python tools/build_pairs.py --check
+
+  api-smoke:
+    name: OpenAI smoke test (spends money)
+    needs: checks
+    if: inputs.run_api_smoke
+    runs-on: ubuntu-latest
+    environment: openai
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Run one pair against the live API
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python tools/smoke_openai.py \
+            --pair '${{ inputs.pair }}' \
+            --model '${{ inputs.model }}' \
+            | tee smoke-output.txt
+
+      - name: Keep the output as an artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-${{ inputs.pair }}-${{ inputs.model }}
+          path: smoke-output.txt
