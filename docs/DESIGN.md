@@ -379,6 +379,8 @@ Each phase is independently useful and de-risks the next.
 
 **Phase 0 — Text-only vertical slice (~2 weeks).** One task type, plain-text pairs, no
 RAG, no UI. Ingest → hypothesize → Tier-1+3 eval → refine → PromptSpec, driven by CLI.
+Pairs come from `data/pairs/agentic-ai-survey.jsonl` (20 prose pairs over one document;
+see `data/README.md` for provenance and the calibration caveat that follows from it).
 Includes the `LLMClient` protocol over OpenRouter with provider pinning and served-provider
 logging from the first commit — retrofitting that after scores exist means throwing the
 scores away.
@@ -419,8 +421,10 @@ when new pairs arrive.
 
 ## 10. Open questions
 
-1. **Multi-input pairs** — when `Iᵢ` is 30 files, is the task per-file or corpus-level?
-   Probably needs an explicit user declaration rather than inference.
+1. ~~**Multi-input pairs** — when `Iᵢ` is 30 files, is the task per-file or
+   corpus-level?~~ **Resolved:** out of scope. `Iᵢ` is a single content blob. Whether
+   it was assembled from one file or thirty is an ingestion concern the system never
+   sees, so no per-file/corpus-level flag threads through alignment.
 2. **Prompt vs. pipeline** — some input→output mappings are not one prompt but a chain.
    Detect this (e.g. when no single prompt clears threshold) and decompose?
 3. **Cross-task transfer** — can a library of induced specs bootstrap induction on a new
