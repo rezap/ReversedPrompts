@@ -5,12 +5,24 @@ description = "Recover the prompt that maps a set of inputs to their outputs"
 requires-python = ">=3.11"
 dependencies = [
     "openai>=1.40",
+    "pydantic>=2.7",
+    "typer>=0.12",
 ]
 
 [project.optional-dependencies]
 # Only needed to regenerate data/corpus/*.md from source PDFs.
 ingest = ["pymupdf>=1.24"]
 dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project.scripts]
+rp = "reversed_prompts.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

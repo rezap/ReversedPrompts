@@ -11,12 +11,42 @@ prompt against new inputs using agentic RAG.
 
 ## Status
 
-Design phase, plus the evaluation data the implementation will be built against. No
-induction pipeline yet.
+**Phase 0 built.** The induction loop runs end to end: ingest → hypothesize → evaluate →
+refine → compile, with the whole thing exercisable offline against a simulated model.
+Align (`[B]`) and RAG are still Phase 2.
 
+- `src/reversed_prompts/` — the slice. Spec, features, metrics, client, generators, loop, CLI.
 - `data/` — one document and 20 `(prompt, output)` pairs. See [data/README.md](data/README.md).
 - `tools/` — the scripts that produced that data, both reproducible.
-- `tests/` — integrity checks over the pair set.
+- `tests/` — 54 checks, none of which need a key.
+
+### What Phase 0 found
+
+The design assumes a corpus shares **one** prompt across all pairs (§1), so facets can be
+pooled. **The shipped corpus has a distinct prompt per pair**, so pooling fights the data:
+corpus-level induction wins or loses depending on the split, which is a coin flip dressed
+as a result. Two consequences, both now encoded in the code rather than in someone's head:
+
+- Per-pair reconstruction — recover a spec from one pair, score it on that pair — beats
+  naive **20/20**. That validates feature extraction, scoring and the loop. It measures
+  reconstruction, not generalization: there is no held-out anything.
+- The corpus-level exit criterion in `docs/DESIGN.md` **is not yet satisfiable**, and won't
+  be until there's a pair set where the pairs genuinely share a task. The test suite
+  asserts that corpus-level search runs and produces auditable output; it deliberately does
+  not assert a win.
+
+Building it also forced three fixes worth naming, because each was silently corrupting
+scores:
+
+| Bug | Effect |
+|---|---|
+| `strip_markup` deleted whole table rows | Table outputs measured as **zero words** — every style feature for them was meaningless |
+| The "naive" baseline was handed the gold output shape | Inflated the bar the exit criterion measures against |
+| The generator asserted mean length and plurality shape unconditionally | Over-committed on corpora where those vary per prompt, scoring *worse* than saying nothing |
+
+The third produced the general rule now applied at induction time: **do not assert what the
+evidence does not support.** Length is claimed only when its coefficient of variation
+across gold is under 0.30; shape only when ≥70% of gold agrees.
 
 ## Architecture
 
@@ -144,9 +174,21 @@ pip install -e '.[dev]'
 pytest
 ```
 
-That needs no API key and costs nothing. It verifies the pairs are well-formed, that every
-stored output was generated against the corpus currently in the tree, and that the prompts
-carrying explicit constraints have outputs that satisfy them.
+No API key, no cost. Covers the pair set (well-formed, generated against the corpus in the
+tree, stated prompt constraints satisfied) and the induction slice (feature extraction,
+scoring, the generators' abstention rules, and the loop run end to end against a simulated
+model).
+
+Two commands exercise the pipeline without spending anything:
+
+```bash
+rp dry-run --category reason     # the full loop, corpus-level
+rp per-pair --simulate           # per-pair reconstruction, all 20
+rp features summ-01              # the measured feature vector for one output
+```
+
+`rp run` and `rp per-pair` without `--simulate` make real calls. Both take `--budget`, a
+hard token ceiling that raises rather than overspending.
 
 In CI, the same checks run from the **checks** workflow — Actions tab → *checks* → *Run
 workflow*. It is manual-only; nothing runs on push.

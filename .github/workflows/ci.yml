@@ -40,6 +40,11 @@ jobs:
       - name: Confirm the pair file is not stale
         run: python tools/build_pairs.py --check
 
+      - name: Exercise the induction loop offline
+        run: |
+          rp dry-run --category reason
+          rp per-pair --simulate | tail -3
+
   api-smoke:
     name: OpenAI smoke test (spends money)
     needs: checks
