@@ -8,15 +8,38 @@ new inputs using agentic RAG.
 
 ## 1. Problem statement
 
-**Given:** a corpus of pairs `P = {(I₁, O₁), (I₂, O₂), … (Iₙ, Oₙ)}` where `Iᵢ` is one or
-more input documents and `Oᵢ` is the artifact a human (or another system) produced from
-them.
+### Two kinds of prompt — do not conflate them
 
-**Find:** a prompt `p` such that `LLM(p, I) ≈ O` for unseen `I` drawn from the same
-distribution.
+This project contains two things called "prompt", and treating them as one causes real
+confusion. They are kept in separate places in the code for that reason.
+
+| | **System prompts** | **The recovered prompt** |
+|---|---|---|
+| What | Instructions we author to make the machinery work: the producer, the critic, the reviser, the similarity judge | The instruction the system outputs, one per prompt group |
+| Who writes it | Us | The system |
+| Where | `src/reversed_prompts/prompts.py`, versioned | `Candidate.text` |
+| Changes when | We tune the machinery | Every run |
+
+**The recovered prompt is the product.** Everything else is scaffolding.
+
+### The unit of work is a prompt group
+
+**Given:** a *prompt group* — one or more pairs `(I, O)` that were produced by the **same**
+instruction. Most groups hold a single pair. A group with several is a **control set**:
+the same instruction applied to different inputs, including at least one where the correct
+answer is "the requested content is not here."
+
+**Find:** the instruction `p` that produced every `O` in the group from its `I`.
 
 **Then:** execute `p` at inference time over new inputs, where the inputs may be too
 large to fit in context — hence agentic RAG.
+
+Control sets are what separate a recovered prompt that states the *rule* from one that
+merely describes the answer it was shown. Given a text containing author names and an
+output listing them, `"list the author names"` and `"extract the author names, return NA if
+none"` both look right. Only the second survives an input with no authors in it. Without a
+negative case in the group, there is no signal that distinguishes them, and the system will
+happily return the weaker one.
 
 The naive framing ("summarize this document") fails because the observable signal in the
 pairs is not just *what task* was performed but *how*: register, structure, length,
@@ -26,7 +49,8 @@ actual product.
 ### Why this is hard (and where the design effort goes)
 
 1. **Underdetermination.** Many prompts produce the same output on a given pair. The one
-   you recover may be an accident of that pair rather than the real rule.
+   you recover may be an accident of that pair rather than the real rule. Control sets
+   attack this directly — a rule that is an accident of one pair fails on the next.
 2. **Scoring.** You cannot optimize what you cannot measure, and "does this read like the
    gold artifact" is not ROUGE.
 3. **Unattributable content.** Real outputs contain facts, opinions, and context that are
@@ -369,16 +393,17 @@ human-in-the-loop review UI (approve/edit candidates, label pairs) · `pytest` +
 
 Each phase is independently useful and de-risks the next.
 
-**Phase 0 — Text-only vertical slice (~2 weeks).** One task type, plain-text pairs, no
-RAG, no UI. Ingest → hypothesize → Tier-1+3 eval → refine → PromptSpec, driven by CLI.
-Pairs come from `data/pairs/agentic-ai-survey.jsonl` (20 prose pairs over one document;
-see `data/README.md` for provenance and the calibration caveat that follows from it).
-Includes the `LLMClient` protocol over the OpenAI API, with model ID and token usage logged
-next to every score from the first commit — retrofitting that after scores exist means
-throwing the scores away.
-*Exit criterion: on a held-out pair, the induced prompt beats the naive baseline on the
-Tier-1 style/structure metrics.* This slice proves or kills the core thesis for a
-fortnight of work — build it before anything else.
+**Phase 0 — Text-only vertical slice.** Plain-text pairs, no RAG, no UI. Per prompt group:
+propose → run → critique → revise, driven by a CLI. Pairs come from
+`data/pairs/agentic-ai-survey.jsonl` — 20 standalone pairs plus 3 control sets; see
+`data/README.md` for provenance and the calibration caveat. Includes the `LLMClient`
+protocol over the OpenAI API, with model ID and token usage logged next to every score from
+the first commit — retrofitting that after scores exist means throwing the scores away.
+
+*Exit criterion: on the control sets, the recovered prompt beats the naive baseline on
+output fidelity **and** handles the negative input correctly.* The negative case is the
+load-bearing half — passing only the positives means the rule was never recovered, just
+the answer.
 
 **Phase 1 — Facet decomposition & contrastive refinement.** Full `PromptSpec`,
 contrastive generator, Tier-2, contamination + length regularizers, LOO cross-validation

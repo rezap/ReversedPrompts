@@ -40,6 +40,11 @@ jobs:
       - name: Confirm the pair file is not stale
         run: python tools/build_pairs.py --check
 
+      - name: Exercise the recovery loop offline
+        run: |
+          rp groups
+          rp run --controls-only --simulate | tail -12
+
   api-smoke:
     name: OpenAI smoke test (spends money)
     needs: checks
