@@ -9,14 +9,63 @@ prompt against new inputs using agentic RAG.
 
 📄 **[Design & implementation plan](docs/DESIGN.md)**
 
+## Two kinds of prompt
+
+The word "prompt" means two different things here, and keeping them apart is the whole
+point of the design:
+
+- **The system's own instructions** — the producer, critic, reviser and similarity judge.
+  We author these. They live in `src/reversed_prompts/prompts.py`, versioned, and the
+  version is stamped on every result. `rp show-prompts` prints them.
+- **The recovered prompt** — what the system outputs, one per prompt group. *This is the
+  product.*
+
 ## Status
 
-Design phase, plus the evaluation data the implementation will be built against. No
-induction pipeline yet.
+**Recovery loop built.** Given an input and the output someone produced from it, the
+system proposes an instruction, runs it, critiques the result, and revises. Align (`[B]`)
+and RAG remain Phase 2.
 
-- `data/` — one document and 20 `(prompt, output)` pairs. See [data/README.md](data/README.md).
+- `src/reversed_prompts/` — the slice: prompts, features, metrics, similarity, client, loop, CLI.
+- `data/` — one document, 20 standalone pairs and 3 control sets. See [data/README.md](data/README.md).
 - `tools/` — the scripts that produced that data, both reproducible.
-- `tests/` — integrity checks over the pair set.
+- `tests/` — 66 checks, none of which need a key.
+
+### Prompt groups and control sets
+
+A **prompt group** is the unit of recovery: the pairs produced by one instruction. Most
+groups hold a single pair. A **control set** holds several — the same instruction over
+different inputs, including at least one where the right answer is "not here."
+
+That negative case is what makes the difference between recovering a rule and recovering
+an answer. Shown a text with author names and an output listing them, both of these look
+correct:
+
+```
+list the author names
+extract the author names, return NA if none
+```
+
+Only the second survives an input with no authors in it. Without a negative in the group
+there is no signal separating them, so the system will hand you the weaker one.
+
+A group's score is its **weakest** member, not its average — an instruction that works on
+two inputs out of three has not been recovered.
+
+### Two scores, because neither is sufficient alone
+
+| Score | Question | Needs the gold prompt? |
+|---|---|---|
+| **Output fidelity** | Does running this instruction reproduce the wanted output? | No |
+| **Prompt match** | Would someone following this behave like someone following the gold? | Yes |
+| **Contamination** | Did it smuggle the answer into the instruction? | No |
+
+The loop optimises output fidelity, because that is the only signal available without
+peeking at the answer. Prompt match is computed afterwards, never inside the loop — the
+gold prompt must not reach the producer or the critic, and a test asserts it does not.
+
+Contamination is reported separately and never averaged in. A prompt containing the answer
+scores beautifully on the other two and is worthless.
 
 ## Architecture
 

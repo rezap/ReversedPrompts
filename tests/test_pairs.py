@@ -21,7 +21,9 @@ SHAPES = {"prose", "list", "table"}
 REQUIRED = {
     "id", "category", "input_ref", "input_sha256",
     "target_prompt", "output", "output_shape", "gold_sections",
+    "prompt_group", "is_negative",
 }
+OPTIONAL = {"input_span"}          # control pairs read a slice of the corpus
 
 
 @pytest.fixture(scope="module")
@@ -41,22 +43,29 @@ def by_id(pairs, pair_id):
 # --- shape -----------------------------------------------------------------
 
 def test_pair_count(pairs):
-    assert len(pairs) == 20
+    standalone = [p for p in pairs if p["prompt_group"] == p["id"]]
+    controls = [p for p in pairs if p["prompt_group"] != p["id"]]
+    assert len(standalone) == 20
+    assert len(controls) == 9        # three control sets of three
+    assert len(pairs) == 29
 
 
 def test_category_balance(pairs):
-    counts = {c: sum(1 for p in pairs if p["category"] == c) for c in CATEGORIES}
+    standalone = [p for p in pairs if p["prompt_group"] == p["id"]]
+    counts = {c: sum(1 for p in standalone if p["category"] == c) for c in CATEGORIES}
     assert counts == {"fetch": 7, "summarize": 6, "reason": 7}
 
 
 def test_records_well_formed(pairs):
     for p in pairs:
-        assert set(p) == REQUIRED, f"{p.get('id')}: unexpected field set"
+        assert REQUIRED <= set(p), f"{p.get('id')}: missing fields"
+        assert set(p) <= REQUIRED | OPTIONAL, f"{p.get('id')}: unexpected fields"
         assert p["category"] in CATEGORIES
         assert p["output_shape"] in SHAPES
         assert p["target_prompt"].strip()
         assert p["output"].strip()
-        assert p["gold_sections"]
+        # control pairs read a slice, so section labels do not apply to them
+        assert p["gold_sections"] or "input_span" in p
 
 
 def test_ids_unique(pairs):
@@ -76,6 +85,20 @@ def test_outputs_match_the_corpus_in_tree(pairs, corpus):
 def test_input_ref_resolves(pairs):
     for p in pairs:
         assert (ROOT / p["input_ref"]).exists()
+
+
+def test_control_spans_are_in_range(pairs, corpus):
+    for p in pairs:
+        if "input_span" in p:
+            a, b = p["input_span"]
+            assert 0 <= a < b <= len(corpus), p["id"]
+            assert corpus[a:b].strip(), p["id"]
+
+
+def test_negative_controls_answer_NA(pairs):
+    for p in pairs:
+        if p["is_negative"]:
+            assert p["output"].strip() == "NA", p["id"]
 
 
 def test_gold_sections_resolve_to_real_headings(pairs, corpus):
