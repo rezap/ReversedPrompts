@@ -223,7 +223,7 @@ Model access is the **OpenAI API** with a single `OPENAI_API_KEY` (§7 of the de
 
 ### Choosing the model
 
-Every role defaults to `gpt5.6-terra`. Change it without editing code:
+Every role defaults to `gpt-5.6-terra`. Change it without editing code:
 
 ```bash
 revprompt models                          # what each role will use

@@ -72,7 +72,7 @@ class UnknownModel(RuntimeError):
     pass
 
 
-DEFAULT_MODEL = "gpt5.6-terra"
+DEFAULT_MODEL = "gpt-5.6-terra"
 ROLES = ("inducer", "executor", "judge", "features")
 
 

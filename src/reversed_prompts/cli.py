@@ -177,7 +177,10 @@ def models(
     typer.echo("\nOverride with --model, $REVPROMPT_MODEL, "
                "or $REVPROMPT_MODEL_<ROLE>.")
     if available:
-        client = OpenAIClient(verify_models=False)
+        try:
+            client = OpenAIClient(verify_models=False)
+        except RuntimeError as e:          # no key: say so, do not stack-trace
+            raise typer.BadParameter(f"{e}. --available needs one.") from None
         typer.echo("\navailable on this key:")
         for m in client.available_models():
             typer.echo(f"  {m}")
