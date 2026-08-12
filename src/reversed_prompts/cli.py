@@ -16,13 +16,22 @@ from .metrics import tier1
 app = typer.Typer(add_completion=False, help=__doc__)
 
 
+def _warn_dropped(param: str, model: str) -> None:
+    note = (f"note: {model} rejected '{param}'; continuing without it.")
+    if param in ("temperature", "seed"):
+        note += ("  Generations will vary more between runs, so scores are "
+                 "less repeatable.")
+    typer.echo(note, err=True)
+
+
 def _client(simulate: bool, model: str | None, budget: int | None):
     if simulate:
         return ObedientClient()
     overrides = {r: model for r in ("executor", "inducer", "judge", "features")} \
         if model else None
     try:
-        return OpenAIClient(models=overrides, max_tokens_budget=budget)
+        return OpenAIClient(models=overrides, max_tokens_budget=budget,
+                            on_unsupported=_warn_dropped)
     except UnknownModel as e:
         raise typer.BadParameter(str(e)) from None
 

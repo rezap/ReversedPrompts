@@ -99,6 +99,17 @@ def resolve_models(overrides: dict[str, str] | None = None,
 class OpenAIClient:
     """Real calls. Roles map to model IDs through `models`.
 
+    Sampling parameters are best-effort. `temperature=0` and a fixed `seed`
+    are what the eval loop wants, but newer reasoning models reject both --
+    they only accept the default temperature. Rather than keep a list of which
+    models allow what, the client sends them, notices a refusal, drops that
+    parameter and retries. The cost is one wasted call per parameter per run;
+    the benefit is that a model shipping tomorrow needs no code change.
+
+    Losing `temperature=0` does mean generations vary more between runs. That
+    is a real hit to score stability, which is part of why the design leans on
+    deterministic Tier-1 metrics rather than trusting single generations.
+
     Precedence for a role's model, strongest first: an explicit `models`
     argument (what `--model` sets), then `$REVPROMPT_MODEL_<ROLE>`, then
     `$REVPROMPT_MODEL`, then `DEFAULT_MODELS`. Environment variables mean the
@@ -109,7 +120,7 @@ class OpenAIClient:
 
     def __init__(self, models: dict[str, str] | None = None,
                  max_tokens_budget: int | None = None, seed: int = 7,
-                 verify_models: bool = True):
+                 verify_models: bool = True, on_unsupported=None):
         from openai import OpenAI  # imported lazily so tests need no dependency
 
         if not os.environ.get("OPENAI_API_KEY"):
@@ -120,6 +131,9 @@ class OpenAIClient:
         self.usage = Usage()
         self.budget = max_tokens_budget
         self.seed = seed
+        # Populated the first time the API refuses a sampling parameter.
+        self.unsupported: set[str] = set()
+        self.on_unsupported = on_unsupported
         if verify_models:
             self._verify_models()
 
@@ -148,6 +162,23 @@ class OpenAIClient:
             f"Set one with --model, $REVPROMPT_MODEL, or a per-role "
             f"$REVPROMPT_MODEL_EXECUTOR.")
 
+    # Sampling controls newer reasoning models reject. Dropped on first refusal
+    # rather than gated on a hardcoded model list, which would need editing
+    # every time a model ships.
+    OPTIONAL_PARAMS = ("temperature", "seed", "top_p")
+
+    def _refused_param(self, err: Exception) -> str | None:
+        """Which optional parameter did the API refuse, if any."""
+        msg = str(err).lower()
+        if "unsupported" not in msg and "not supported" not in msg:
+            return None
+        for name in self.OPTIONAL_PARAMS:
+            if name in self.unsupported:
+                continue
+            if f"'{name}'" in msg or f'"{name}"' in msg:
+                return name
+        return None
+
     def complete(self, system: str, user: str, *, role: str = "executor",
                  temperature: float = 0.0) -> Completion:
         if self.budget is not None and self.usage.total_tokens >= self.budget:
@@ -155,13 +186,30 @@ class OpenAIClient:
                 f"token budget {self.budget} exhausted ({self.usage.summary()})")
 
         model = self.models.get(role, self.models["executor"])
-        r = self._client.chat.completions.create(
-            model=model,
-            temperature=temperature,
-            seed=self.seed,
-            messages=[{"role": "system", "content": system},
-                      {"role": "user", "content": user}],
-        )
+        messages = [{"role": "system", "content": system},
+                    {"role": "user", "content": user}]
+
+        # Retry once per refused parameter, then give up. Each refusal is
+        # remembered, so a run pays this at most len(OPTIONAL_PARAMS) times
+        # rather than on every call.
+        for _ in range(len(self.OPTIONAL_PARAMS) + 1):
+            kwargs: dict = {"model": model, "messages": messages}
+            if "temperature" not in self.unsupported:
+                kwargs["temperature"] = temperature
+            if "seed" not in self.unsupported:
+                kwargs["seed"] = self.seed
+            try:
+                r = self._client.chat.completions.create(**kwargs)
+                break
+            except Exception as e:
+                refused = self._refused_param(e)
+                if refused is None:
+                    raise
+                self.unsupported.add(refused)
+                if self.on_unsupported:
+                    self.on_unsupported(refused, model)
+        else:                                   # pragma: no cover - defensive
+            raise RuntimeError("exhausted parameter retries")
         u = r.usage
         detail = getattr(u, "prompt_tokens_details", None)
         c = Completion(
