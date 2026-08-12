@@ -10,8 +10,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Only needed to regenerate data/corpus/*.md from source PDFs.
-ingest = ["pymupdf>=1.24"]
 dev = ["pytest>=8.0"]
 
 [build-system]

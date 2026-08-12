@@ -11,10 +11,16 @@ on:
         type: boolean
         default: false
       pair:
-        description: "Which pair the smoke test runs"
+        description: "Which prompt group to recover"
         type: choice
-        default: fetch-01
-        options: [fetch-01, fetch-04, summ-01, summ-06, reason-02, reason-07]
+        default: ody-speaker-name
+        options:
+          - ody-speaker-name
+          - ody-stake-material
+          - ody-named-gods
+          - ody-bow-outcome
+          - ody-escape-method
+          - ody-three-sentence-summary
       model:
         description: "Model id for the smoke test"
         type: string
@@ -38,7 +44,7 @@ jobs:
         run: pytest -v
 
       - name: Confirm the pair file is not stale
-        run: python tools/build_pairs.py --check
+        run: python tools/build_odyssey.py --check
 
       - name: Exercise the recovery loop offline
         run: |
@@ -61,14 +67,13 @@ jobs:
       - name: Install
         run: pip install -e .
 
-      - name: Run one pair against the live API
+      - name: Recover one group's prompt against the live API
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          python tools/smoke_openai.py \
-            --pair '${{ inputs.pair }}' \
-            --model '${{ inputs.model }}' \
-            | tee smoke-output.txt
+          rp run --group '${{ inputs.pair }}' \
+                 --model '${{ inputs.model }}' \
+                 --show-outputs | tee smoke-output.txt
 
       - name: Keep the output as an artifact
         if: always()

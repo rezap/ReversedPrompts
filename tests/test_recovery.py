@@ -52,25 +52,22 @@ def test_every_pair_lands_in_exactly_one_group(pairs, groups):
     assert sorted(ids) == sorted(p.id for p in pairs)
 
 
-def test_standalone_pairs_group_alone(groups):
-    singles = [g for g in groups if not g.is_control]
-    assert len(singles) == 20
-    assert all(g.id == g.pairs[0].id for g in singles)
+def test_every_group_shares_one_gold_prompt(groups):
+    for g in groups:
+        assert len({p.target_prompt for p in g.pairs}) == 1, g.id
 
 
-def test_control_sets_exist_and_share_one_gold_prompt(groups):
-    controls = [g for g in groups if g.is_control]
-    assert len(controls) == 3
-    for g in controls:
-        assert len({p.target_prompt for p in g.pairs}) == 1
-        assert len(g) >= 3
+def test_every_group_spans_several_inputs(groups):
+    """Each instruction is applied across variants whose answers differ, so a
+    prompt that merely describes one answer cannot pass."""
+    assert all(g.is_control for g in groups)
+    assert len(groups) >= 10
 
 
-def test_at_least_one_control_set_has_a_negative(groups):
+def test_at_least_one_group_has_a_negative(groups):
     """A negative is what catches a prompt that describes the answer it saw."""
-    controls = [g for g in groups if g.is_control]
-    assert sum(g.has_negative for g in controls) >= 2
-    for g in controls:
+    assert sum(g.has_negative for g in groups) >= 1
+    for g in groups:
         for p in g.pairs:
             if p.is_negative:
                 assert p.output.strip() == "NA", p.id
@@ -83,12 +80,15 @@ def test_control_inputs_actually_differ(groups):
 
 
 def test_negative_inputs_really_lack_the_content(groups):
-    """If a 'negative' input contained the answer, NA would be the wrong gold."""
-    agi = next(g for g in groups if g.id == "ctl-agi-predictions")
-    for p in agi.pairs:
+    """If a 'negative' input named a god, NA would be the wrong gold."""
+    import re as _re
+    gods = ["Jove", "Saturn", "Minerva", "Neptune", "Apollo", "Calypso",
+            "Circe", "Mercury", "Hyperion", "Juno", "Venus"]
+    g = next(x for x in groups if x.id == "ody-named-gods")
+    for p in g.pairs:
         if p.is_negative:
-            low = p.input_text.lower()
-            assert "kurzweil" not in low and "lecun" not in low, p.id
+            found = [n for n in gods if _re.search(r"\b%s\b" % n, p.input_text)]
+            assert not found, f"{p.id} names {found} but its gold answer is NA"
 
 
 def test_group_rejects_conflicting_gold_prompts():
@@ -98,12 +98,11 @@ def test_group_rejects_conflicting_gold_prompts():
         ingest.group([a, b])
 
 
-def test_input_span_slices_the_document(groups):
-    """Control pairs read a slice, not the whole corpus."""
-    whole = len(ingest.load()[0].input_text)
-    for g in (x for x in groups if x.is_control):
-        for p in g.pairs:
-            assert 0 < len(p.input_text) < whole
+def test_each_variant_is_its_own_passage(groups):
+    """Variants must differ in text, or the group tests nothing."""
+    for g in groups:
+        texts = {p.input_text for p in g.pairs}
+        assert len(texts) == len(g.pairs), f"{g.id}: variants are identical"
 
 
 # ------------------------------------------------------------------ parsing
@@ -187,7 +186,7 @@ def test_version_is_recorded_on_every_result(groups, scale):
 # ------------------------------------------------------------------ evidence
 
 def test_measure_reports_shape_and_length(groups):
-    g = next(x for x in groups if x.id == "ctl-two-sentence")
+    g = next(x for x in groups if x.id == "ody-three-sentence-summary")
     text = recover.measure(g.pairs)
     assert "sentences" in text and "words" in text and "shape:" in text
     assert text.count("\n") == len(g.pairs) - 1

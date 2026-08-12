@@ -27,30 +27,45 @@ system proposes an instruction, runs it, critiques the result, and revises. Alig
 and RAG remain Phase 2.
 
 - `src/reversed_prompts/` — the slice: prompts, features, metrics, similarity, client, loop, CLI.
-- `data/` — one document, 20 standalone pairs and 3 control sets. See [data/README.md](data/README.md).
+- `data/` — 20 altered passages from the Odyssey, 38 pairs in 13 groups. See [data/README.md](data/README.md).
 - `tools/` — the scripts that produced that data, both reproducible.
-- `tests/` — 66 checks, none of which need a key.
+- `tests/` — 69 checks, none of which need a key.
 
-### Prompt groups and control sets
+### Prompt groups
 
-A **prompt group** is the unit of recovery: the pairs produced by one instruction. Most
-groups hold a single pair. A **control set** holds several — the same instruction over
-different inputs, including at least one where the right answer is "not here."
+A **prompt group** is the unit of recovery: the pairs produced by one instruction. Every
+group in the current set applies its instruction across several inputs **whose answers
+differ**, which is what stops a recovered prompt from passing by describing the one answer
+it happened to see.
 
-That negative case is what makes the difference between recovering a rule and recovering
-an answer. Shown a text with author names and an output listing them, both of these look
-correct:
+One group carries **negatives** — inputs where the right answer is "not here." That case
+is the difference between recovering a rule and recovering an answer. Shown a text with
+author names and an output listing them, both of these look correct:
 
 ```
 list the author names
 extract the author names, return NA if none
 ```
 
-Only the second survives an input with no authors in it. Without a negative in the group
-there is no signal separating them, so the system will hand you the weaker one.
+Only the second survives an input with no authors in it.
 
 A group's score is its **weakest** member, not its average — an instruction that works on
 two inputs out of three has not been recovered.
+
+### The test set is also a groundedness probe
+
+The passages are Homer's Odyssey **with facts deliberately changed**. The stake is cedar,
+not olive. Telemachus strings the bow, or it snaps and nobody does. The men escape in whey
+jars rather than under the sheep.
+
+Every model has read the Odyssey, so a wrong answer here is diagnostic: it means the model
+answered from memory rather than from the text in front of it. That matters for this
+project specifically, because **a recovered prompt that scores well only because the model
+already knew the answer has not been validated at all.**
+
+Tests enforce that the alterations actually defeat memory — no gold answer may match what
+Homer says, and the variants within a group may not all answer alike. See
+[data/README.md](data/README.md).
 
 ### Two scores, because neither is sufficient alone
 
@@ -206,14 +221,13 @@ Model access is the **OpenAI API** with a single `OPENAI_API_KEY` (§7 of the de
 
 ```bash
 export OPENAI_API_KEY=sk-...
-python tools/smoke_openai.py                    # cheapest pair
-python tools/smoke_openai.py --pair reason-02   # a hard one
-python tools/smoke_openai.py --list-models
+rp run --group ody-speaker-name --show-outputs   # the cheapest group
+rp run --group ody-bow-outcome --show-outputs    # a major alteration
+rp run                                           # every group
 ```
 
-This runs one pair's gold prompt against the corpus and prints the model's answer beside
-the stored one — the Phase 0 executor step in miniature. It sends the whole ~20k-word
-document, so each run costs real money.
+Each group's passages are short, so a single group costs very little. `--show-outputs`
+prints what the recovered instruction produced beside what was wanted.
 
 The same script runs in CI as the **api-smoke** job, which is off unless you tick
 `run_api_smoke` when starting the workflow.
@@ -237,10 +251,8 @@ contribution. That is intended.
 ## Regenerating the data
 
 ```bash
-pip install -e '.[ingest]'
-python tools/pdf_to_markdown.py 2504.18875v1.pdf data/corpus/agentic-ai-survey.md
-python tools/build_pairs.py
+python tools/build_odyssey.py
 ```
 
-Both are deterministic. `tools/build_pairs.py --check` fails if the committed JSONL has
-drifted from its source, and `pytest` runs that check for you.
+Deterministic. `--check` fails if the committed passages or pairs have drifted from the
+builder, and `pytest` runs that check for you.
