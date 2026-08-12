@@ -423,3 +423,51 @@ def test_empty_override_is_ignored_rather_than_blanking_the_model():
     got = resolve_models({"executor": None, "judge": ""}, env={})
     assert got["executor"] == DEFAULT_MODEL
     assert got["judge"] == DEFAULT_MODEL
+
+
+# ----------------------------------------------------------------- encoding
+
+def test_every_file_read_and_write_declares_an_encoding():
+    """Windows defaults to the locale codepage, not UTF-8.
+
+    `Path.read_text()` with no encoding uses cp1252 on a default Windows
+    install, which cannot decode the curly quotes in the Odyssey passages --
+    it dies with "'charmap' codec can't decode byte 0x9d". The passages are
+    UTF-8, so every read and write has to say so.
+    """
+    import ast
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    offenders = []
+    for d in ("src", "tools", "tests"):
+        for f in (root / d).rglob("*.py"):
+            tree = ast.parse(f.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+                if name in ("read_text", "write_text", "open"):
+                    if not any(k.arg == "encoding" for k in node.keywords):
+                        offenders.append(f"{f.relative_to(root)}:{node.lineno} {name}()")
+    assert not offenders, (
+        "these will break on Windows; pass encoding=\"utf-8\":\n  "
+        + "\n  ".join(offenders))
+
+
+def test_corpus_loads_under_a_non_utf8_locale(monkeypatch):
+    """End-to-end guard: simulate the Windows default and load the real data."""
+    import pathlib as _pl
+
+    real = _pl.Path.read_text
+
+    def cp1252(self, *a, **kw):
+        if "encoding" not in kw:
+            return self.read_bytes().decode("cp1252")
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(_pl.Path, "read_text", cp1252)
+    gs = ingest.load_groups()
+    assert len(gs) >= 10
+    assert any("’" in p.input_text for g in gs for p in g.pairs), (
+        "expected curly quotes to survive the round trip")

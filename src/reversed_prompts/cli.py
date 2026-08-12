@@ -97,7 +97,7 @@ def compare(
     if pair is None:
         raise typer.BadParameter(f"no pair {pair_id!r}")
     scale = recover.fit_scale(pairs)
-    score, breakdown = tier1(pair.output, candidate_file.read_text(), scale)
+    score, breakdown = tier1(pair.output, candidate_file.read_text(encoding="utf-8"), scale)
     typer.echo(f"output fidelity {score:.4f}")
     for k in ("shape", "structure", "style", "combined_distance"):
         typer.echo(f"  {k:<20} {breakdown[k]:.3f}")
@@ -161,7 +161,7 @@ def run(
                                   if r.best.prompt_score else None),
                 "per_pair": r.best.per_pair,
             } for r in results],
-        }, indent=2, ensure_ascii=False))
+        }, indent=2, ensure_ascii=False), encoding="utf-8")
         typer.echo(f"\nwrote {out}")
 
 

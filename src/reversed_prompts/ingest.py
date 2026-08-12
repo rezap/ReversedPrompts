@@ -64,7 +64,7 @@ def load(path: pathlib.Path | str = DEFAULT_PAIRS,
     path = pathlib.Path(path)
     pairs: list[Pair] = []
     cache: dict[str, str] = {}
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         r = json.loads(line)
@@ -72,7 +72,7 @@ def load(path: pathlib.Path | str = DEFAULT_PAIRS,
             continue
         ref = r["input_ref"]
         if ref not in cache:
-            cache[ref] = (ROOT / ref).read_text()
+            cache[ref] = (ROOT / ref).read_text(encoding="utf-8")
         text = cache[ref]
         if r.get("input_span"):                 # a slice of the source document
             start, end = r["input_span"]

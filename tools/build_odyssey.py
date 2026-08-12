@@ -577,11 +577,11 @@ def main() -> None:
 
     if args.check:
         problems = []
-        if not OUT.exists() or OUT.read_text() != body:
+        if not OUT.exists() or OUT.read_text(encoding="utf-8") != body:
             problems.append(str(OUT))
         for vid, text in corpus.items():
             f = CORPUS_DIR / f"{vid}.md"
-            if not f.exists() or f.read_text() != text + "\n":
+            if not f.exists() or f.read_text(encoding="utf-8") != text + "\n":
                 problems.append(str(f))
         if problems:
             raise SystemExit("stale, rerun tools/build_odyssey.py:\n  "
@@ -592,9 +592,9 @@ def main() -> None:
 
     CORPUS_DIR.mkdir(parents=True, exist_ok=True)
     for vid, text in corpus.items():
-        (CORPUS_DIR / f"{vid}.md").write_text(text + "\n")
+        (CORPUS_DIR / f"{vid}.md").write_text(text + "\n", encoding="utf-8")
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(body)
+    OUT.write_text(body, encoding="utf-8")
 
     majors = sum(1 for v in VARIANTS if v["strength"] == "major")
     print(f"wrote {len(corpus)} passages ({majors} with major alterations) "
