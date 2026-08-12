@@ -16,7 +16,7 @@ point of the design:
 
 - **The system's own instructions** — the producer, critic, reviser and similarity judge.
   We author these. They live in `src/reversed_prompts/prompts.py`, versioned, and the
-  version is stamped on every result. `rp show-prompts` prints them.
+  version is stamped on every result. `revprompt show-prompts` prints them.
 - **The recovered prompt** — what the system outputs, one per prompt group. *This is the
   product.*
 
@@ -204,6 +204,8 @@ Full detail in [docs/DESIGN.md](docs/DESIGN.md).
 ## Running the checks
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -e '.[dev]'
 pytest
 ```
@@ -219,11 +221,30 @@ workflow*. It is manual-only; nothing runs on push.
 
 Model access is the **OpenAI API** with a single `OPENAI_API_KEY` (§7 of the design doc).
 
+### Choosing the model
+
+Every role defaults to `gpt5.6-terra`. Change it without editing code:
+
+```bash
+revprompt models                          # what each role will use
+revprompt models --available              # what this key can actually use
+export REVPROMPT_MODEL=some-other-model   # all four roles
+export REVPROMPT_MODEL_JUDGE=...          # just the judge
+revprompt run --model ... --group ...     # one run only, beats both env vars
+```
+
+Precedence is `--model` → `$REVPROMPT_MODEL_<ROLE>` → `$REVPROMPT_MODEL` → default.
+
+The models are checked against the API before any call is made, so a wrong id fails
+immediately with a list of close matches rather than dying part-way through a run.
+**A model change re-baselines every score** — results from different models are not
+comparable, which is why the model is recorded on every result.
+
 ```bash
 export OPENAI_API_KEY=sk-...
-rp run --group ody-speaker-name --show-outputs   # the cheapest group
-rp run --group ody-bow-outcome --show-outputs    # a major alteration
-rp run                                           # every group
+revprompt run --group ody-speaker-name --show-outputs   # the cheapest group
+revprompt run --group ody-bow-outcome --show-outputs    # a major alteration
+revprompt run                                           # every group
 ```
 
 Each group's passages are short, so a single group costs very little. `--show-outputs`

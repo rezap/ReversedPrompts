@@ -383,3 +383,43 @@ def test_infer_shape_tracks_the_corpus_labels(pairs):
     for p in pairs:
         if p.output_shape == "table":
             assert infer_shape(p.output) == "table", p.id
+
+
+# ---------------------------------------------------------- model resolution
+
+def test_default_model_is_used_when_nothing_overrides_it():
+    from reversed_prompts.client import DEFAULT_MODEL, resolve_models
+    got = resolve_models(env={})
+    assert set(got) == {"inducer", "executor", "judge", "features"}
+    assert all(m == DEFAULT_MODEL for m in got.values())
+
+
+def test_env_var_overrides_the_default_for_every_role():
+    from reversed_prompts.client import resolve_models
+    got = resolve_models(env={"REVPROMPT_MODEL": "some-model"})
+    assert all(m == "some-model" for m in got.values())
+
+
+def test_per_role_env_var_beats_the_blanket_one():
+    from reversed_prompts.client import resolve_models
+    got = resolve_models(env={"REVPROMPT_MODEL": "blanket",
+                              "REVPROMPT_MODEL_JUDGE": "specific"})
+    assert got["judge"] == "specific"
+    assert got["executor"] == "blanket"
+
+
+def test_explicit_override_beats_everything():
+    """This is what --model sets, so it has to win."""
+    from reversed_prompts.client import resolve_models
+    got = resolve_models({"executor": "flag"},
+                         env={"REVPROMPT_MODEL": "blanket",
+                              "REVPROMPT_MODEL_EXECUTOR": "specific"})
+    assert got["executor"] == "flag"
+    assert got["judge"] == "blanket"
+
+
+def test_empty_override_is_ignored_rather_than_blanking_the_model():
+    from reversed_prompts.client import DEFAULT_MODEL, resolve_models
+    got = resolve_models({"executor": None, "judge": ""}, env={})
+    assert got["executor"] == DEFAULT_MODEL
+    assert got["judge"] == DEFAULT_MODEL
