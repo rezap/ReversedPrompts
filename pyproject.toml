@@ -17,7 +17,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project.scripts]
-rp = "reversed_prompts.cli:app"
+revprompt = "reversed_prompts.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]

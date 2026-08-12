@@ -8,7 +8,8 @@ from typing import Optional
 import typer
 
 from . import ingest, prompts, recover
-from .client import ObedientClient, OpenAIClient
+from .client import (DEFAULT_MODEL, ObedientClient, OpenAIClient,
+                     UnknownModel, resolve_models)
 from .features import ALL_KEYS, extract
 from .metrics import tier1
 
@@ -18,8 +19,12 @@ app = typer.Typer(add_completion=False, help=__doc__)
 def _client(simulate: bool, model: str | None, budget: int | None):
     if simulate:
         return ObedientClient()
-    overrides = {"executor": model, "inducer": model, "judge": model} if model else None
-    return OpenAIClient(models=overrides, max_tokens_budget=budget)
+    overrides = {r: model for r in ("executor", "inducer", "judge", "features")} \
+        if model else None
+    try:
+        return OpenAIClient(models=overrides, max_tokens_budget=budget)
+    except UnknownModel as e:
+        raise typer.BadParameter(str(e)) from None
 
 
 def _print_group(r: recover.GroupResult, show_outputs: bool) -> None:
@@ -158,6 +163,24 @@ def run(
             } for r in results],
         }, indent=2, ensure_ascii=False))
         typer.echo(f"\nwrote {out}")
+
+
+@app.command()
+def models(
+    available: bool = typer.Option(False, "--available",
+                                   help="list what this key can actually use"),
+) -> None:
+    """Show which model each role will use. --available needs a key."""
+    typer.echo(f"default: {DEFAULT_MODEL}\n")
+    for role, m in resolve_models().items():
+        typer.echo(f"  {role:<10} {m}")
+    typer.echo("\nOverride with --model, $REVPROMPT_MODEL, "
+               "or $REVPROMPT_MODEL_<ROLE>.")
+    if available:
+        client = OpenAIClient(verify_models=False)
+        typer.echo("\navailable on this key:")
+        for m in client.available_models():
+            typer.echo(f"  {m}")
 
 
 @app.command()

@@ -68,27 +68,85 @@ class BudgetExceeded(RuntimeError):
     pass
 
 
-class OpenAIClient:
-    """Real calls. Roles map to model IDs through `models`."""
+class UnknownModel(RuntimeError):
+    pass
 
-    DEFAULT_MODELS = {
-        "inducer": "gpt-4.1",
-        "executor": "gpt-4.1-mini",
-        "judge": "gpt-4.1",
-        "features": "gpt-4.1-mini",
-    }
+
+DEFAULT_MODEL = "gpt5.6-terra"
+ROLES = ("inducer", "executor", "judge", "features")
+
+
+def resolve_models(overrides: dict[str, str] | None = None,
+                   env: dict[str, str] | None = None) -> dict[str, str]:
+    """Work out which model each role uses.
+
+    Precedence, strongest first: an explicit override (what `--model` sets),
+    `$REVPROMPT_MODEL_<ROLE>`, `$REVPROMPT_MODEL`, then the default. Kept as a
+    free function so the precedence can be tested without an API key.
+    """
+    env = os.environ if env is None else env
+    every = env.get("REVPROMPT_MODEL")
+    out = {}
+    for role in ROLES:
+        out[role] = (env.get(f"REVPROMPT_MODEL_{role.upper()}")
+                     or every or DEFAULT_MODEL)
+    for role, model in (overrides or {}).items():
+        if model:
+            out[role] = model
+    return out
+
+
+class OpenAIClient:
+    """Real calls. Roles map to model IDs through `models`.
+
+    Precedence for a role's model, strongest first: an explicit `models`
+    argument (what `--model` sets), then `$REVPROMPT_MODEL_<ROLE>`, then
+    `$REVPROMPT_MODEL`, then `DEFAULT_MODELS`. Environment variables mean the
+    model can be changed without editing code, which matters because a model
+    change re-baselines every score and is therefore something you do
+    deliberately and often.
+    """
 
     def __init__(self, models: dict[str, str] | None = None,
-                 max_tokens_budget: int | None = None, seed: int = 7):
+                 max_tokens_budget: int | None = None, seed: int = 7,
+                 verify_models: bool = True):
         from openai import OpenAI  # imported lazily so tests need no dependency
 
         if not os.environ.get("OPENAI_API_KEY"):
             raise RuntimeError("OPENAI_API_KEY is not set")
         self._client = OpenAI()
-        self.models = {**self.DEFAULT_MODELS, **(models or {})}
+
+        self.models = resolve_models(models)
         self.usage = Usage()
         self.budget = max_tokens_budget
         self.seed = seed
+        if verify_models:
+            self._verify_models()
+
+    def available_models(self) -> list[str]:
+        return sorted(m.id for m in self._client.models.list().data)
+
+    def _verify_models(self) -> None:
+        """Fail before spending anything if a role points at a model this key
+        cannot use. Without this the first call dies mid-run on an opaque
+        upstream error, after the run has already been set up."""
+        try:
+            available = set(self.available_models())
+        except Exception:
+            return                      # cannot list models; let the call fail
+        missing = {r: m for r, m in self.models.items() if m not in available}
+        if not missing:
+            return
+        wanted = sorted(set(missing.values()))
+        near = [m for m in sorted(available)
+                if any(m.startswith(w.split("-")[0][:4]) for w in wanted)]
+        hint = "\n  ".join(near[:15]) or "(none look similar)"
+        raise UnknownModel(
+            f"model(s) not available on this key: {', '.join(wanted)}\n"
+            f"roles affected: {', '.join(sorted(missing))}\n"
+            f"closest available:\n  {hint}\n"
+            f"Set one with --model, $REVPROMPT_MODEL, or a per-role "
+            f"$REVPROMPT_MODEL_EXECUTOR.")
 
     def complete(self, system: str, user: str, *, role: str = "executor",
                  temperature: float = 0.0) -> Completion:
