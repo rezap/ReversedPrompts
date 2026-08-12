@@ -395,8 +395,8 @@ Each phase is independently useful and de-risks the next.
 
 **Phase 0 — Text-only vertical slice.** Plain-text pairs, no RAG, no UI. Per prompt group:
 propose → run → critique → revise, driven by a CLI. Pairs come from
-`data/pairs/agentic-ai-survey.jsonl` — 20 standalone pairs plus 3 control sets; see
-`data/README.md` for provenance and the calibration caveat. Includes the `LLMClient`
+`data/pairs/odyssey.jsonl` — 38 pairs in 13 groups over deliberately altered passages of
+Homer, which measures groundedness alongside recovery; see `data/README.md`. Includes the `LLMClient`
 protocol over the OpenAI API, with model ID and token usage logged next to every score from
 the first commit — retrofitting that after scores exist means throwing the scores away.
 

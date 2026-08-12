@@ -15,7 +15,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-DEFAULT_PAIRS = ROOT / "data" / "pairs" / "agentic-ai-survey.jsonl"
+DEFAULT_PAIRS = ROOT / "data" / "pairs" / "odyssey.jsonl"
 
 
 @dataclass(frozen=True)
@@ -28,6 +28,8 @@ class Pair:
     output_shape: str = "prose"
     prompt_group: str = ""      # defaults to the pair's own id
     is_negative: bool = False   # the correct answer here is "not present"
+    source_book: str = ""       # which book of the Odyssey the passage came from
+    alteration: str = ""        # "minor" or "major" -- how far it departs from Homer
 
     @property
     def group(self) -> str:
@@ -84,6 +86,8 @@ def load(path: pathlib.Path | str = DEFAULT_PAIRS,
             output_shape=r.get("output_shape", "prose"),
             prompt_group=r.get("prompt_group", ""),
             is_negative=r.get("is_negative", False),
+            source_book=r.get("source_book", ""),
+            alteration=r.get("alteration", ""),
         ))
     if not pairs:
         raise ValueError(f"no pairs loaded from {path}"
