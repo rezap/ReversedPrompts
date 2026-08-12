@@ -51,12 +51,12 @@ HOMERIC = {
 
 @pytest.fixture(scope="module")
 def records():
-    return [json.loads(l) for l in PAIRS.read_text().splitlines() if l.strip()]
+    return [json.loads(l) for l in PAIRS.read_text(encoding="utf-8").splitlines() if l.strip()]
 
 
 @pytest.fixture(scope="module")
 def corpus():
-    return {f.stem: f.read_text() for f in CORPUS_DIR.glob("*.md")}
+    return {f.stem: f.read_text(encoding="utf-8") for f in CORPUS_DIR.glob("*.md")}
 
 
 def by_group(records, gid):
@@ -92,7 +92,7 @@ def test_passages_match_their_recorded_digest(records):
     """Guards against a passage being edited without its answers being redone."""
     import hashlib
     for r in records:
-        text = (ROOT / r["input_ref"]).read_text()
+        text = (ROOT / r["input_ref"]).read_text(encoding="utf-8")
         digest = hashlib.sha256(text.encode()).hexdigest()
         assert digest == r["input_sha256"], f"{r['id']}: passage changed"
 
@@ -195,19 +195,19 @@ def test_answers_within_a_group_are_not_all_the_same(records):
 def test_extracted_names_appear_in_their_passage(records):
     for gid in ("ody-speaker-name", "ody-speaker-father"):
         for r in by_group(records, gid):
-            text = (ROOT / r["input_ref"]).read_text()
+            text = (ROOT / r["input_ref"]).read_text(encoding="utf-8")
             assert r["output"] in text, f"{r['id']}: answer absent from passage"
 
 
 def test_extracted_wood_appears_in_its_passage(records):
     for r in by_group(records, "ody-stake-material"):
-        text = (ROOT / r["input_ref"]).read_text()
+        text = (ROOT / r["input_ref"]).read_text(encoding="utf-8")
         assert f"green {r['output']} wood" in text, r["id"]
 
 
 def test_island_lists_appear_in_order_in_their_passage(records):
     for r in by_group(records, "ody-neighbour-islands"):
-        text = (ROOT / r["input_ref"]).read_text()
+        text = (ROOT / r["input_ref"]).read_text(encoding="utf-8")
         names = [l.lstrip("- ").strip() for l in r["output"].splitlines()]
         positions = [text.find(n) for n in names]
         assert all(p >= 0 for p in positions), r["id"]
@@ -219,7 +219,7 @@ def test_negative_answers_are_NA_and_their_passage_names_no_god(records):
     assert negatives, "the set needs at least one negative"
     for r in negatives:
         assert r["output"].strip() == "NA", r["id"]
-        text = (ROOT / r["input_ref"]).read_text()
+        text = (ROOT / r["input_ref"]).read_text(encoding="utf-8")
         found = [g for g in GODS if re.search(rf"\b{g}\b", text)]
         assert not found, f"{r['id']} names {found} but answers NA"
 
@@ -228,7 +228,7 @@ def test_positive_god_answers_name_every_god_present(records):
     for r in by_group(records, "ody-named-gods"):
         if r["is_negative"]:
             continue
-        text = (ROOT / r["input_ref"]).read_text()
+        text = (ROOT / r["input_ref"]).read_text(encoding="utf-8")
         present = {g for g in GODS if re.search(rf"\b{g}\b", text)}
         listed = {l.lstrip("- ").strip() for l in r["output"].splitlines()}
         assert listed == present, f"{r['id']}: listed {listed}, passage has {present}"
