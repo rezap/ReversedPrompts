@@ -22,9 +22,9 @@ on:
           - ody-escape-method
           - ody-three-sentence-summary
       model:
-        description: "Model id for the smoke test"
+        description: "Model id; leave blank to use the project default"
         type: string
-        default: gpt-4.1-mini
+        default: ""
 
 jobs:
   checks:
@@ -67,17 +67,28 @@ jobs:
       - name: Install
         run: pip install -e .
 
+      - name: Show which model each role will use
+        run: revprompt models
+
+      # An empty `model` input means "whatever the code defaults to". Passing
+      # --model only when one was typed keeps the workflow from pinning a
+      # second copy of the default that then drifts out of sync with the code.
       - name: Recover one group's prompt against the live API
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          MODEL: ${{ inputs.model }}
         run: |
-          revprompt run --group '${{ inputs.pair }}' \
-                 --model '${{ inputs.model }}' \
-                 --show-outputs | tee smoke-output.txt
+          if [ -n "$MODEL" ]; then
+            revprompt run --group '${{ inputs.pair }}' --model "$MODEL" \
+                     --show-outputs | tee smoke-output.txt
+          else
+            revprompt run --group '${{ inputs.pair }}' \
+                     --show-outputs | tee smoke-output.txt
+          fi
 
       - name: Keep the output as an artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: smoke-${{ inputs.pair }}-${{ inputs.model }}
+          name: smoke-${{ inputs.pair }}-${{ inputs.model || 'default' }}
           path: smoke-output.txt
