@@ -24,6 +24,36 @@ def _warn_dropped(param: str, model: str) -> None:
     typer.echo(note, err=True)
 
 
+def _warn_truncated(cuts: list[recover.Truncation], total_pairs: int) -> None:
+    """Say plainly that the producer and critic are working half-blind.
+
+    Printed before the first API call, because the useful response is to stop
+    and re-run with a bigger cap, not to read it afterwards next to a score
+    that may mean nothing.
+    """
+    cap = cuts[0].cap
+    need = max(c.total for c in cuts)
+    bar = "!" * 78
+    typer.echo(f"\n{bar}", err=True)
+    typer.echo(f"WARNING: {len(cuts)} of {total_pairs} inputs are longer than "
+               f"the {cap}-char excerpt cap.", err=True)
+    typer.echo("The producer and critic will not see the end of these "
+               "documents. A low score", err=True)
+    typer.echo("for the affected groups may mean 'could not see the evidence' "
+               "rather than", err=True)
+    typer.echo("'could not recover the prompt'.\n", err=True)
+    shown = cuts[:10]
+    width = max(len(c.pair_id) for c in shown)
+    for c in shown:
+        typer.echo(f"  {c.pair_id:<{width}}  {c.total:>7} chars   "
+                   f"{c.lost:>6} cut   (group {c.group_id})", err=True)
+    if len(cuts) > 10:
+        typer.echo(f"  ... and {len(cuts) - 10} more", err=True)
+    typer.echo(f"\nRe-run with --excerpt-chars {need} to see all of them.",
+               err=True)
+    typer.echo(f"{bar}\n", err=True)
+
+
 def _client(simulate: bool, model: str | None, budget: int | None):
     if simulate:
         return ObedientClient()
@@ -123,6 +153,9 @@ def run(
     show_outputs: bool = typer.Option(False, help="print produced vs wanted text"),
     model: Optional[str] = typer.Option(None, help="override every role"),
     budget: Optional[int] = typer.Option(400_000, help="hard token ceiling"),
+    excerpt_chars: int = typer.Option(
+        recover.EXCERPT_CHARS,
+        help="document chars the producer and critic see, per input"),
     out: Optional[pathlib.Path] = typer.Option(None, help="write results here"),
     pairs_path: pathlib.Path = typer.Option(ingest.DEFAULT_PAIRS, "--pairs"),
 ) -> None:
@@ -135,11 +168,16 @@ def run(
     if controls_only:
         gs = [g for g in gs if g.is_control]
 
+    cuts = recover.truncations(gs, excerpt_chars)
+    if cuts:
+        _warn_truncated(cuts, sum(len(g) for g in gs))
+
     client = _client(simulate, model, budget)
-    typer.echo(f"{len(gs)} group(s), system prompts v{prompts.VERSION}\n")
+    typer.echo(f"{len(gs)} group(s), system prompts v{prompts.VERSION}, "
+               f"excerpt cap {excerpt_chars}\n")
 
     results = recover.recover_all(client, gs, rounds=rounds, judge=judge,
-                                  verbose=True)
+                                  verbose=True, excerpt_chars=excerpt_chars)
     for r in results:
         _print_group(r, show_outputs)
 
@@ -156,6 +194,8 @@ def run(
     if out:
         out.write_text(json.dumps({
             "prompts_version": prompts.VERSION,
+            "excerpt_chars": excerpt_chars,
+            "truncated_inputs": [c.pair_id for c in cuts],
             "summary": s,
             "groups": [{
                 "id": r.group.id,

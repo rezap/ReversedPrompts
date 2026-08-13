@@ -235,6 +235,22 @@ revprompt run --model ... --group ...     # one run only, beats both env vars
 
 Precedence is `--model` → `$REVPROMPT_MODEL_<ROLE>` → `$REVPROMPT_MODEL` → default.
 
+### How much of the document the system sees
+
+The executor always gets the whole input. The producer and critic get the first
+`--excerpt-chars` of it, 8092 by default, because the producer sees *every* document in
+a group at once and that prompt would otherwise grow without bound as control sets get
+larger.
+
+Nothing in the shipped set hits that cap, and a test asserts it. If a future input does,
+`run` prints a warning naming each cut input before spending anything — a low score on a
+truncated group may mean *"could not see the evidence"* rather than *"could not recover
+the prompt"*, and those must not be confused. Raise it with `--excerpt-chars N`.
+
+A cap is the wrong tool once inputs get genuinely long — the evidence for an output sits
+wherever it happens to be, and a prefix keeps the first N characters regardless. That is
+what retrieval is for; see §8 of the design doc.
+
 The models are checked against the API before any call is made, so a wrong id fails
 immediately with a list of close matches rather than dying part-way through a run.
 **A model change re-baselines every score** — results from different models are not
