@@ -471,3 +471,94 @@ def test_corpus_loads_under_a_non_utf8_locale(monkeypatch):
     assert len(gs) >= 10
     assert any("’" in p.input_text for g in gs for p in g.pairs), (
         "expected curly quotes to survive the round trip")
+
+
+# ------------------------------------------------- unsupported sampling params
+
+class _FakeCompletions:
+    """Mimics an API that rejects some sampling parameters."""
+
+    def __init__(self, refuse):
+        self.refuse = set(refuse)
+        self.calls: list[dict] = []
+
+    def create(self, **kw):
+        self.calls.append(kw)
+        for name in self.refuse:
+            if name in kw:
+                raise RuntimeError(
+                    f"Error code: 400 - {{'error': {{'message': \"Unsupported "
+                    f"value: '{name}' does not support 0 with this model. Only "
+                    f"the default (1) value is supported.\", 'type': "
+                    f"'invalid_request_error', 'param': '{name}'}}}}")
+        usage = type("U", (), {"prompt_tokens": 5, "completion_tokens": 2,
+                               "prompt_tokens_details": None})()
+        msg = type("M", (), {"content": "ok"})()
+        return type("R", (), {"choices": [type("C", (), {"message": msg})()],
+                              "model": kw["model"], "usage": usage})()
+
+
+def _client_with(refuse):
+    from reversed_prompts.client import OpenAIClient
+    c = OpenAIClient.__new__(OpenAIClient)      # skip __init__, needs no key
+    c.models = {r: "m" for r in ("inducer", "executor", "judge", "features")}
+    c.usage = __import__("reversed_prompts.client", fromlist=["Usage"]).Usage()
+    c.budget = None
+    c.seed = 7
+    c.unsupported = set()
+    c.on_unsupported = None
+    fake = _FakeCompletions(refuse)
+    c._client = type("X", (), {"chat": type("Y", (), {"completions": fake})()})()
+    return c, fake
+
+
+def test_sampling_params_are_sent_when_the_model_accepts_them():
+    c, fake = _client_with(refuse=[])
+    c.complete("s", "u")
+    assert fake.calls[0]["temperature"] == 0.0
+    assert fake.calls[0]["seed"] == 7
+    assert c.unsupported == set()
+
+
+def test_a_refused_temperature_is_dropped_and_the_call_retried():
+    """The exact failure a real run hit: temperature=0 rejected outright."""
+    c, fake = _client_with(refuse=["temperature"])
+    out = c.complete("s", "u")
+    assert out.text == "ok"
+    assert "temperature" not in fake.calls[-1]
+    assert "seed" in fake.calls[-1]         # only the refused one goes
+    assert c.unsupported == {"temperature"}
+
+
+def test_a_refusal_is_remembered_so_later_calls_do_not_retry():
+    c, fake = _client_with(refuse=["temperature"])
+    c.complete("s", "u")
+    before = len(fake.calls)
+    c.complete("s", "u")
+    assert len(fake.calls) == before + 1, "should not re-learn the same refusal"
+
+
+def test_several_refused_params_are_dropped_one_by_one():
+    c, fake = _client_with(refuse=["temperature", "seed"])
+    assert c.complete("s", "u").text == "ok"
+    assert c.unsupported == {"temperature", "seed"}
+    assert "temperature" not in fake.calls[-1] and "seed" not in fake.calls[-1]
+
+
+def test_an_unrelated_error_is_not_swallowed():
+    class Boom(_FakeCompletions):
+        def create(self, **kw):
+            raise RuntimeError("Error code: 401 - invalid api key")
+
+    c, _ = _client_with(refuse=[])
+    c._client = type("X", (), {"chat": type("Y", (), {"completions": Boom([])})()})()
+    with pytest.raises(RuntimeError, match="401"):
+        c.complete("s", "u")
+
+
+def test_the_caller_is_told_when_a_param_is_dropped():
+    seen = []
+    c, _ = _client_with(refuse=["temperature"])
+    c.on_unsupported = lambda param, model: seen.append((param, model))
+    c.complete("s", "u")
+    assert seen == [("temperature", "m")]
