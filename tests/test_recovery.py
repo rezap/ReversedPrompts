@@ -146,16 +146,21 @@ def test_contamination_catches_a_prompt_carrying_the_answer():
     assert contamination(clean, answer) == 0.0
 
 
-def test_contamination_is_penalised_not_averaged():
+def test_contamination_is_flagged_rather_than_blended_into_the_score():
+    """A contaminated prompt scores *well* on judged similarity -- that is the
+    whole problem with it. Subtracting it from the score would hide that; a
+    flag beside an unchanged score does not."""
     dirty = PromptScore(judged=0.9, lexical=0.9, contamination=0.5)
     clean = PromptScore(judged=0.6, lexical=0.6, contamination=0.0)
-    assert clean.combined > dirty.combined
+    assert dirty.contaminated and not clean.contaminated
+    assert dirty.judged == 0.9, "the similarity score itself is left alone"
     assert "CONTAMINATED" in dirty.line()
+    assert "CONTAMINATED" not in clean.line()
 
 
 def test_score_prompt_uses_the_worst_output(groups):
     g = next(x for x in groups if x.is_control)
-    s = score_prompt(ScriptedClient(default="8"), "some instruction",
+    s = score_prompt(ScriptedClient(default="0.80"), "some instruction",
                      g.gold_prompt, [p.output for p in g.pairs])
     assert s.judged == pytest.approx(0.8)
     assert 0.0 <= s.contamination <= 1.0
@@ -615,3 +620,106 @@ def test_the_executor_sees_the_whole_document_regardless_of_the_cap():
     recover.run_candidate(Recorder(), recover.Candidate(text="do it"), group,
                           scale)
     assert seen and all("TAIL" in u for u in seen)
+
+
+# ------------------------------------------------ the similarity judge's reply
+
+def test_the_judge_reply_parser_accepts_only_the_required_format():
+    """The old parser stripped non-digits and took the first two, so '3/10'
+    read as 31, clamped to 10, and scored 1.00 -- a judge saying "quite
+    different" was recorded as a flawless match. Every rejected case below is
+    one the old code silently accepted."""
+    from reversed_prompts.similarity import parse_score
+
+    assert parse_score("0.00") == 0.0
+    assert parse_score("0.35") == 0.35
+    assert parse_score("1.00") == 1.0
+    assert parse_score("  0.90\n") == 0.9
+
+    for bad in ("8", "10", "9/10", "3/10", "I'd say 7 out of 10.", "0.9",
+                "1.01", "**0.90**", "0.900", "90%", "", "high"):
+        assert parse_score(bad) is None, bad
+
+
+def test_a_malformed_reply_is_retried_and_the_retry_is_not_a_verbatim_resend():
+    """Resending the identical prompt tends to get the identical malformed
+    reply -- the model is not being contrary, it read the instruction the same
+    way. The retry has to show it what it actually said."""
+    from reversed_prompts.similarity import judge_similarity
+
+    class Stubborn(ScriptedClient):
+        def __init__(self):
+            super().__init__()
+            self.replies = ["8", "0.75"]
+
+        def complete(self, system, user, *, role="executor", temperature=0.0):
+            self.calls.append((role, system, user))
+            from reversed_prompts.client import Completion
+            return Completion(text=self.replies[len(self.calls) - 1],
+                              model="stub")
+
+    client = Stubborn()
+    assert judge_similarity(client, "a", "b") == pytest.approx(0.75)
+    assert len(client.calls) == 2
+    first, second = client.calls[0][2], client.calls[1][2]
+    assert first != second
+    assert "'8'" in second, "the retry should quote the malformed reply back"
+
+
+def test_exhausting_the_attempts_raises_rather_than_inventing_a_score():
+    """The old code returned 0.5 here. In a summary a fabricated 0.5 is
+    indistinguishable from a judged 0.5, so the run has to die instead."""
+    from reversed_prompts.similarity import JudgeFormatError, judge_similarity
+
+    with pytest.raises(JudgeFormatError) as excinfo:
+        judge_similarity(ScriptedClient(default="not a number"), "a", "b",
+                         context="group ody-test")
+    message = str(excinfo.value)
+    assert "ody-test" in message
+    assert "not a number" in message, "the offending reply must be shown"
+
+
+def test_the_attempt_count_is_honoured():
+    from reversed_prompts.similarity import JudgeFormatError, judge_similarity
+
+    client = ScriptedClient(default="nope")
+    with pytest.raises(JudgeFormatError):
+        judge_similarity(client, "a", "b", max_attempts=1)
+    assert len(client.calls) == 1
+
+    client = ScriptedClient(default="nope")
+    with pytest.raises(JudgeFormatError):
+        judge_similarity(client, "a", "b", max_attempts=5)
+    assert len(client.calls) == 5
+
+    with pytest.raises(ValueError):
+        judge_similarity(ScriptedClient(default="0.50"), "a", "b",
+                         max_attempts=0)
+
+
+def test_the_offline_double_answers_in_the_format_the_judge_demands():
+    """If the double replied in the old integer form, every offline run would
+    fail for a reason that has nothing to do with what it is testing."""
+    from reversed_prompts.similarity import judge_similarity
+    score = judge_similarity(ObedientClient(), "extract the author names",
+                             "extract the author names, NA if none")
+    assert 0.0 <= score <= 1.0
+
+
+def test_the_summary_counts_contaminated_groups(groups, scale):
+    """One contaminated prompt among twelve clean ones barely moves a mean and
+    is the single most important thing to notice in a run."""
+    from reversed_prompts.similarity import PromptScore
+
+    def fake(contamination):
+        g = groups[0]
+        r = recover.GroupResult(group=g, best=recover.Candidate(text="x"),
+                                naive=recover.Candidate(text="y"))
+        r.best.prompt_score = PromptScore(judged=0.9, lexical=0.5,
+                                          contamination=contamination)
+        return r
+
+    s = recover.summarise([fake(0.9), fake(0.0), fake(0.0)])
+    assert s["contaminated_groups"] == 1
+    assert s["mean_prompt_similarity"] == pytest.approx(0.9), \
+        "similarity itself is untouched by the flag"

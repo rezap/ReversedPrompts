@@ -12,6 +12,7 @@ from .client import (DEFAULT_MODEL, ObedientClient, OpenAIClient,
                      UnknownModel, resolve_models)
 from .features import ALL_KEYS, extract
 from .metrics import tier1
+from .similarity import MAX_JUDGE_ATTEMPTS, JudgeFormatError
 
 app = typer.Typer(add_completion=False, help=__doc__)
 
@@ -150,6 +151,9 @@ def run(
     rounds: int = typer.Option(2),
     simulate: bool = typer.Option(False, help="offline double: no key, no spend"),
     judge: bool = typer.Option(True, help="score the recovered prompt against gold"),
+    judge_attempts: int = typer.Option(
+        MAX_JUDGE_ATTEMPTS,
+        help="how many times to re-ask a judge that replies in the wrong format"),
     show_outputs: bool = typer.Option(False, help="print produced vs wanted text"),
     model: Optional[str] = typer.Option(None, help="override every role"),
     budget: Optional[int] = typer.Option(400_000, help="hard token ceiling"),
@@ -176,8 +180,19 @@ def run(
     typer.echo(f"{len(gs)} group(s), system prompts v{prompts.VERSION}, "
                f"excerpt cap {excerpt_chars}\n")
 
-    results = recover.recover_all(client, gs, rounds=rounds, judge=judge,
-                                  verbose=True, excerpt_chars=excerpt_chars)
+    try:
+        results = recover.recover_all(client, gs, rounds=rounds, judge=judge,
+                                      verbose=True, excerpt_chars=excerpt_chars,
+                                      judge_attempts=judge_attempts)
+    except JudgeFormatError as e:
+        # Deliberately fatal: a fabricated similarity score is indistinguishable
+        # from a real one downstream. Shown as an error, not a traceback.
+        typer.echo(f"\nJUDGE ERROR: {e}", err=True)
+        typer.echo(f"usage so far: {client.usage.summary()}", err=True)
+        typer.echo("Nothing was scored. Retry, raise --judge-attempts, or set "
+                   "$REVPROMPT_MODEL_JUDGE to a model that follows the format.",
+                   err=True)
+        raise typer.Exit(1) from None
     for r in results:
         _print_group(r, show_outputs)
 
@@ -189,6 +204,8 @@ def run(
     if "mean_prompt_similarity" in s:
         typer.echo(f"  mean prompt match     {s['mean_prompt_similarity']:.4f}")
         typer.echo(f"  worst contamination   {s['max_contamination']:.4f}")
+        typer.echo(f"  contaminated groups   {int(s['contaminated_groups'])}"
+                   f"/{int(s['groups'])}")
     typer.echo(f"  usage                 {client.usage.summary()}")
 
     if out:

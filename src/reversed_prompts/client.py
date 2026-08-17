@@ -372,13 +372,19 @@ class ObedientClient:
 
     @staticmethod
     def _similarity(user: str) -> str:
+        """Jaccard overlap, formatted the way the judge is asked to reply.
+
+        The format matters as much as the number: the parser rejects anything
+        that is not x.yz, so a double replying "7" would make every offline run
+        fail for a reason unrelated to what it is testing.
+        """
         import re as _re
         a, _, b = user.partition("INSTRUCTION B:")
         def words(t): return {w.lower() for w in _re.findall(r"[A-Za-z]{4,}", t)}
         wa, wb = words(a), words(b)
         if not wa or not wb:
-            return "0"
-        return str(round(10 * len(wa & wb) / len(wa | wb)))
+            return "0.00"
+        return f"{len(wa & wb) / len(wa | wb):.2f}"
 
     # ---------------------------------------------------------------- dispatch
 

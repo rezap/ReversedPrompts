@@ -9,12 +9,12 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 ## PR A — The judge reports what it was told
 
-**Status: `[~]` in progress**
+**Status: `[x]` done — PR pending review**
 
 The prompt-match number is the headline metric and it is currently wrong in the
 worst direction: verbose judge replies score as perfect matches.
 
-### A1 `[~]` Strict judge format, with retries, failing loudly
+### A1 `[x]` Strict judge format, with retries, failing loudly
 
 Measured on the current code:
 
@@ -48,18 +48,22 @@ Consequence, accepted deliberately: one malformed reply aborts the run, after
 money has been spent. The CLI turns it into a clean error rather than a
 traceback so the cause is obvious. Revisit if it proves noisy in practice.
 
+Landed: `--judge-attempts` on `revprompt run`, `JudgeFormatError` naming the
+group and quoting every reply, and the usage so far printed alongside so the
+spend is visible when the run dies.
+
 Touches `prompts.SIMILARITY_JUDGE` (the scale changes from an integer 0-10 to a
 decimal 0.00-1.00), so `prompts.VERSION` is bumped, and the offline double must
 emit the new format.
 
-### A2 `[ ]` Delete the dead `PromptScore.combined`
+### A2 `[x]` Delete the dead `PromptScore.combined`
 
 Used nowhere but one test, and it implies contamination is applied as a penalty
 when nothing applies it. Replaced with `contaminated_groups`: a count in the
 summary and the JSON, using the existing 0.05 threshold. Keeps the design's
 "reported separately, never averaged in" while making it visible.
 
-### A3 `[ ]` Tests
+### A3 `[x]` Tests
 
 `judge_similarity` currently has **zero** coverage, which is why A1 survived.
 

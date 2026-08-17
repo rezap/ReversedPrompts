@@ -80,7 +80,15 @@ peeking at the answer. Prompt match is computed afterwards, never inside the loo
 gold prompt must not reach the producer or the critic, and a test asserts it does not.
 
 Contamination is reported separately and never averaged in. A prompt containing the answer
-scores beautifully on the other two and is worthless.
+scores beautifully on the other two and is worthless, so it is **flagged and counted**
+rather than subtracted from the similarity score — subtracting it would hide the very
+thing worth noticing.
+
+The judge must reply with a decimal `0.00`–`1.00` and nothing else. A malformed reply is
+re-asked up to `--judge-attempts` times (default 3), quoting back what it said; if it still
+will not comply, **the run fails**. That is deliberate. The previous behaviour was to score
+an unparseable reply 0.5, and in a summary a fabricated 0.5 is indistinguishable from a
+judged one.
 
 ## Architecture
 
