@@ -300,6 +300,48 @@ def retrieve(
 
 
 @app.command()
+def eval_retrieval(
+    source: Optional[pathlib.Path] = typer.Option(
+        None, help="document to index and probe; default is the Odyssey"),
+    doc_id: str = typer.Option("odyssey-eval"),
+    k: int = typer.Option(5, help="precision@k"),
+    keyword_weight: float = typer.Option(1.0, help="fusion weight, keyword arm"),
+    vector_weight: float = typer.Option(1.0, help="fusion weight, vector arm"),
+    backend: str = typer.Option("lance", help="lance | memory"),
+    real_embeddings: bool = typer.Option(
+        False, help="use the API; the default is the free offline double"),
+    index_dir: pathlib.Path = typer.Option(None),
+    fail_under: float = typer.Option(
+        0.0, help="exit non-zero if mean fused precision falls below this"),
+) -> None:
+    """Score keyword, vector and fused retrieval against known-relevant chunks.
+
+    Free by default: the offline embedder costs nothing, and its numbers are a
+    regression guard rather than a verdict on retrieval. Pass
+    --real-embeddings for the measurement that decides anything.
+    """
+    from . import retrieval, retrieval_eval
+
+    r = _retriever(backend, index_dir or retrieval.DEFAULT_INDEX_DIR,
+                   real_embeddings)
+    text = (source or retrieval_eval.DEFAULT_SOURCE).read_text(encoding="utf-8")
+    n = r.index(doc_id, text)
+    typer.echo(f"{doc_id}: {len(text)} chars, {n} chunks, "
+               f"embedder {r.embedder.model}\n")
+
+    weights = [keyword_weight, vector_weight]
+    results = retrieval_eval.evaluate(r, doc_id, k=k, weights=weights)
+    typer.echo(retrieval_eval.format_report(results, k))
+
+    mean_fused = (sum(x.arms["fused"].precision for x in results) / len(results)
+                  if results else 0.0)
+    if fail_under and mean_fused < fail_under:
+        typer.echo(f"\nmean fused precision {mean_fused:.3f} is below "
+                   f"--fail-under {fail_under}", err=True)
+        raise typer.Exit(1)
+
+
+@app.command()
 def show_prompts() -> None:
     """Print the system's own instructions -- the ones we author, not recover."""
     typer.echo(f"version {prompts.VERSION}\n")

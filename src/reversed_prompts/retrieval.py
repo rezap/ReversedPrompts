@@ -173,6 +173,29 @@ class _BaseRetriever:
 
     # ------------------------------------------------------------- indexing
 
+    # -------------------------------------------------------------- searching
+
+    def rankings(self, doc_id: str, text: str, depth: int = 30,
+                 ) -> tuple[list[str], list[str], dict[str, float]]:
+        """The two rankings and the keyword strengths, before fusion.
+
+        Exposed rather than buried inside `search` because the arms have to be
+        measurable separately. "Hybrid retrieval works" is not a checkable
+        claim; "keyword scored 5/5, vector 0/5, fused 3/5" is, and it was that
+        measurement that caught fusion making the strong retriever worse.
+        """
+        raise NotImplementedError
+
+    def search(self, doc_id: str, *, text: str, k: int = 8, expand: int = 1,
+               weights: list[float] | None = None) -> list[Passage]:
+        keyword, vector, strength = self.rankings(doc_id, text,
+                                                  depth=max(k * 3, 10))
+        if not keyword and not vector:
+            return []
+        ranked = fuse([keyword, vector], tiebreak=strength, weights=weights)
+        return self._to_passages(doc_id, [(int(i), s) for i, s in ranked],
+                                 k, expand)
+
     def _prepare(self, doc_id: str, text: str) -> tuple[list[Chunk], list[list[float]]]:
         kwargs = {"target_chars": self.target_chars} if self.target_chars else {}
         chunks = chunk_text(text, doc_id, **kwargs)
@@ -254,11 +277,11 @@ class MemoryRetriever(_BaseRetriever):
     def _terms(text: str) -> set[str]:
         return {w for w in re.findall(r"[A-Za-z][A-Za-z'-]{2,}", text.lower())}
 
-    def search(self, doc_id: str, *, text: str, k: int = 8,
-               expand: int = 1) -> list[Passage]:
+    def rankings(self, doc_id: str, text: str, depth: int = 30,
+                 ) -> tuple[list[str], list[str], dict[str, float]]:
         _, chunks = self._load_source(doc_id)
         if not chunks:
-            return []
+            return [], [], {}
         if doc_id not in self._vectors:                # loaded from disk
             self._vectors[doc_id] = {
                 c.ordinal: v for c, v in
@@ -268,7 +291,7 @@ class MemoryRetriever(_BaseRetriever):
         overlap = {str(c.ordinal): float(len(query_terms & self._terms(c.text)))
                    for c in chunks}
         keyword_ranking = sorted((i for i, n in overlap.items() if n),
-                                 key=lambda i: -overlap[i])
+                                 key=lambda i: -overlap[i])[:depth]
 
         qvec = self.embedder.embed([text])[0]
         vectors = self._vectors[doc_id]
@@ -278,11 +301,9 @@ class MemoryRetriever(_BaseRetriever):
 
         vector_ranking = [str(c.ordinal) for c in
                           sorted(chunks, key=lambda c: cosine(vectors[c.ordinal]),
-                                 reverse=True)]
+                                 reverse=True)][:depth]
 
-        ranked = fuse([keyword_ranking, vector_ranking], tiebreak=overlap)
-        return self._to_passages(doc_id, [(int(i), s) for i, s in ranked],
-                                 k, expand)
+        return keyword_ranking, vector_ranking, overlap
 
 
 class LanceRetriever(_BaseRetriever):
@@ -330,11 +351,10 @@ class LanceRetriever(_BaseRetriever):
         table.create_index("text", config=FTS(), replace=True)
         return len(chunks)
 
-    def search(self, doc_id: str, *, text: str, k: int = 8,
-               expand: int = 1) -> list[Passage]:
+    def rankings(self, doc_id: str, text: str, depth: int = 30,
+                 ) -> tuple[list[str], list[str], dict[str, float]]:
         db = self._connect()
         table = db.open_table(self._table_name(doc_id))
-        depth = max(k * 3, 10)
 
         keyword_rows = (table.search(_fts_safe(text), query_type="fts")
                         .limit(depth).to_list())
@@ -348,9 +368,7 @@ class LanceRetriever(_BaseRetriever):
                        .limit(depth).to_list())
         vector_ranking = [str(r["ordinal"]) for r in vector_rows]
 
-        ranked = fuse([keyword_ranking, vector_ranking], tiebreak=strength)
-        return self._to_passages(doc_id, [(int(i), s) for i, s in ranked],
-                                 k, expand)
+        return keyword_ranking, vector_ranking, strength
 
 
 def _fts_safe(query: str) -> str:

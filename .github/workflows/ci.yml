@@ -10,6 +10,15 @@ on:
         description: "Also call the OpenAI API (costs money, needs OPENAI_API_KEY)"
         type: boolean
         default: false
+      run_retrieval_eval:
+        description: "Score retrieval with real embeddings (~$0.01, needs OPENAI_API_KEY)"
+        type: boolean
+        default: false
+      retrieval_k:
+        description: "precision@k for the retrieval score"
+        type: choice
+        default: "5"
+        options: ["3", "5", "10"]
       pair:
         description: "Which prompt group to recover"
         type: choice
@@ -50,6 +59,22 @@ jobs:
         run: |
           revprompt groups
           revprompt run --controls-only --simulate | tail -12
+
+      # Retrieval, end to end, with the hashing double: index a real 698k-char
+      # book, search it, and score the result. Costs nothing and needs no key.
+      - name: Exercise retrieval offline
+        run: |
+          revprompt index odyssey data/source/odyssey-pg1727.txt \
+                   --no-real-embeddings
+          revprompt retrieve odyssey "Antinous the ringleader of the suitors" \
+                   --no-real-embeddings --k 2 --chars 200
+
+      # A floor, not a target. The offline embedder contributes nothing to
+      # these numbers -- the fused score is carried entirely by keyword search
+      # -- so this catches chunking or fusion breaking, and says nothing about
+      # whether retrieval is good. The real measurement is the gated job below.
+      - name: Score retrieval (offline floor)
+        run: revprompt eval-retrieval --no-real-embeddings --fail-under 0.20
 
   api-smoke:
     name: OpenAI smoke test (spends money)
@@ -92,3 +117,41 @@ jobs:
         with:
           name: smoke-${{ inputs.pair }}-${{ inputs.model || 'default' }}
           path: smoke-output.txt
+
+  retrieval-eval:
+    name: retrieval quality, real embeddings (spends money)
+    needs: checks
+    if: inputs.run_retrieval_eval
+    runs-on: ubuntu-latest
+    environment: openai
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install -e '.[rag]'
+
+      # This is the measurement the Phase B decision rests on. Offline, the
+      # vector arm scores 0.000 and fusion scores *below* keyword alone; that
+      # is the hashing double having no semantics, not a verdict on retrieval.
+      # Whether the vector arm earns its place is only answerable here.
+      #
+      # Indexing the whole book is ~175k tokens, about a cent at
+      # text-embedding-3-small prices, and the report is kept as an artifact so
+      # two runs can be compared rather than remembered.
+      - name: Score keyword vs vector vs fused
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          revprompt eval-retrieval --real-embeddings \
+                   --k '${{ inputs.retrieval_k }}' | tee retrieval-eval.txt
+
+      - name: Keep the report as an artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrieval-eval
+          path: retrieval-eval.txt
