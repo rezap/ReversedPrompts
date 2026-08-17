@@ -296,3 +296,69 @@ def test_weighting_can_stop_a_weak_retriever_dragging_a_strong_one_down():
 
     trusted = [i for i, _ in retrieval.fuse([keyword, noise], weights=[3.0, 1.0])]
     assert trusted[:2] == ["right", "also-right"]
+
+
+# ---------------------------------------------------------- retrieval scoring
+
+def test_evaluation_scores_each_arm_separately(index_dir):
+    """The arms must be measurable apart. 'Hybrid works' is not checkable;
+    'keyword 5/5, vector 0/5, fused 3/5' is, and that is what caught fusion
+    making the strong retriever worse."""
+    from reversed_prompts import retrieval_eval
+
+    r = MemoryRetriever(index_dir, target_chars=200)
+    r.index("book", BOOK)
+    probes = (retrieval_eval.Probe("antagonist", "Antinous ringleader",
+                                   r"Antinous"),)
+    results = retrieval_eval.evaluate(r, "book", probes=probes, k=2)
+
+    assert len(results) == 1
+    assert results[0].relevant_chunks == 1
+    assert set(results[0].arms) == {"keyword", "vector", "fused"}
+    assert results[0].arms["keyword"].hits >= 1
+
+
+def test_the_report_calls_out_fusion_underperforming_a_single_arm():
+    """The whole point of reporting three numbers is noticing when the fused
+    one is the worst. Silently printing a table would bury that."""
+    from reversed_prompts.retrieval_eval import (ArmResult, Probe, ProbeResult,
+                                                 format_report)
+
+    def result(keyword, vector, fused):
+        return ProbeResult(Probe("p", "q", "r"), 3, {
+            "keyword": ArmResult("keyword", keyword, 5),
+            "vector": ArmResult("vector", vector, 5),
+            "fused": ArmResult("fused", fused, 5)})
+
+    dragged = format_report([result(5, 0, 3)], 5)
+    assert "NOTE: fusion" in dragged and "below the better single arm" in dragged
+
+    helped = format_report([result(3, 3, 5)], 5)
+    assert "NOTE" not in helped
+
+
+def test_rankings_are_capped_at_the_requested_depth(index_dir):
+    r = MemoryRetriever(index_dir, target_chars=120)
+    r.index("book", BOOK)
+    keyword, vector, _ = r.rankings("book", "suitors and the ship", depth=2)
+    assert len(keyword) <= 2 and len(vector) <= 2
+
+
+def test_fusion_weights_reach_search(index_dir, monkeypatch):
+    """--keyword-weight has to actually reach fusion, or the knob the report
+    recommends is decorative. Asserted on the call rather than on the ranking:
+    on a corpus small enough for a test the two arms agree, so a changed weight
+    correctly changes nothing and a ranking assertion would prove nothing."""
+    r = MemoryRetriever(index_dir, target_chars=200)
+    r.index("book", BOOK)
+
+    seen = {}
+    real = retrieval.fuse
+
+    def spy(rankings, k=retrieval.RRF_K, tiebreak=None, weights=None):
+        seen["weights"] = weights
+        return real(rankings, k, tiebreak, weights)
+
+    monkeypatch.setattr(retrieval, "fuse", spy)
+    r.search("book", text="suitors", k=5, weights=[3.0, 1.0])
+    assert seen["weights"] == [3.0, 1.0]

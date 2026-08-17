@@ -215,7 +215,13 @@ stored output was generated against the corpus currently in the tree, and that t
 carrying explicit constraints have outputs that satisfy them.
 
 In CI, the same checks run from the **checks** workflow — Actions tab → *checks* → *Run
-workflow*. It is manual-only; nothing runs on push.
+workflow*. It is manual-only; nothing runs on push. That free job also indexes the whole
+698k-character book, searches it, and scores the result, so the retrieval path is
+exercised end to end without a key.
+
+Two jobs spend money and are off unless ticked: `run_api_smoke` recovers one group's
+prompt against the live API, and `run_retrieval_eval` scores retrieval with real
+embeddings.
 
 ## Talking to the API
 
@@ -274,19 +280,37 @@ is free and changing the model can never mix two models' vectors in one index.
 
 The index lives in `data/index/` and is gitignored. Rebuild it with `revprompt index`.
 
-**Retrieval quality is not yet established.** Measured on the full Odyssey with the
-*offline* hashing embedder, precision@5 for `"Antinous the ringleader of the suitors"`:
+#### Scoring retrieval
 
-| | precision@5 |
-|---|---|
-| keyword only | 5/5 |
-| vector only | 0/5 |
-| equal-weight fusion | **3/5** |
+`revprompt eval-retrieval` scores each arm separately against known-relevant chunks, so
+*"hybrid search works"* becomes a number rather than a hope. Four probes: two turning on a
+rare proper noun, two phrased as descriptions with the name withheld.
 
-Fusion made the good retriever worse by averaging in a bad one. That says the offline
-double has no semantics — which is expected and documented — but it is also the reason
-`fuse()` takes weights, and the reason the same measurement has to be repeated against
-real embeddings before retrieval is trusted with anything.
+```bash
+revprompt eval-retrieval                      # free, offline double
+revprompt eval-retrieval --real-embeddings    # ~$0.01, the one that decides anything
+```
+
+**Retrieval quality is not yet established.** With the *offline* hashing embedder:
+
+```
+probe       relevant    keyword     vector      fused
+antagonist        44     5/5        0/5        3/5
+cyclops            6     2/5        0/5        2/5
+shroud             7     0/5        0/5        0/5
+sirens             9     1/5        0/5        1/5
+mean p@5                  0.400      0.000      0.300
+```
+
+Fusion scores *below* keyword alone — averaging in a bad ranking makes a good one worse —
+and the two description-shaped probes are the ones keyword search cannot do. Both are
+expected: the offline embedder has lexical similarity and no semantics. Neither is a
+verdict on retrieval, which is why the command reports the arms separately and prints a
+warning when the fused number is the worst of the three.
+
+The same measurement against real embeddings is what decides whether the vector arm earns
+its place. Run it from the Actions tab by ticking `run_retrieval_eval`; the report is kept
+as an artifact so two runs can be compared rather than remembered.
 
 The models are checked against the API before any call is made, so a wrong id fails
 immediately with a list of close matches rather than dying part-way through a run.
