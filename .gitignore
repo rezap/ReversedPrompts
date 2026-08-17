@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Retrieval index: rebuilt on demand by `revprompt index`, never committed.
+# Binary index files churn on every data change and go stale silently.
+data/index/

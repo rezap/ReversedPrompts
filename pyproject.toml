@@ -10,7 +10,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+# Retrieval. Optional because the loop does not use it yet, and because the
+# whole test suite runs against the in-process backend without it.
+rag = ["lancedb>=0.20"]
+dev = ["pytest>=8.0", "lancedb>=0.20"]
 
 [build-system]
 requires = ["setuptools>=68"]
