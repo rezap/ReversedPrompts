@@ -37,7 +37,7 @@ from .ingest import Pair, PromptGroup
 from .metrics import Scale, describe_gap, tier1
 from .similarity import PromptScore, score_prompt
 
-EXCERPT_CHARS = 3000        # how much document the critic sees
+EXCERPT_CHARS = 8092        # per document, in the producer and critic prompts
 NAIVE = "Answer the question about the document above."
 
 
@@ -98,23 +98,55 @@ def measure(pairs: list[Pair]) -> str:
     return "\n".join(lines)
 
 
-def _blocks(pairs: list[Pair]) -> str:
+def _blocks(pairs: list[Pair], cap: int = EXCERPT_CHARS) -> str:
     parts = []
     for i, p in enumerate(pairs, 1):
         head = f"### Example {i}"
         if p.is_negative:
             head += "  (the document does not contain the requested content)"
-        parts.append(f"{head}\nDOCUMENT (excerpt):\n{p.input_text[:EXCERPT_CHARS]}"
+        parts.append(f"{head}\nDOCUMENT (excerpt):\n{p.input_text[:cap]}"
                      f"\n\nOUTPUT:\n{p.output}")
     return "\n\n".join(parts)
 
 
+@dataclass(frozen=True)
+class Truncation:
+    """One input the producer and critic will only partly see."""
+
+    pair_id: str
+    group_id: str
+    total: int
+    cap: int
+
+    @property
+    def lost(self) -> int:
+        return self.total - self.cap
+
+
+def truncations(groups: list[PromptGroup],
+                cap: int = EXCERPT_CHARS) -> list[Truncation]:
+    """Which inputs the cap will cut, worst first.
+
+    The executor always sees the whole document; only the producer and critic
+    are capped. So a cut here means the components doing the *inference* are
+    reasoning about an output partly generated from text they cannot see, and
+    a low score for that group is ambiguous -- it may mean "could not see the
+    evidence" rather than "could not recover the prompt". Worth saying out
+    loud before any money is spent, not after.
+    """
+    found = [Truncation(pair_id=p.id, group_id=g.id, total=len(p.input_text),
+                        cap=cap)
+             for g in groups for p in g.pairs if len(p.input_text) > cap]
+    return sorted(found, key=lambda t: t.lost, reverse=True)
+
+
 # --------------------------------------------------------------------- steps
 
-def propose(client: LLMClient, group: PromptGroup) -> Candidate:
+def propose(client: LLMClient, group: PromptGroup,
+            cap: int = EXCERPT_CHARS) -> Candidate:
     text = client.complete(
         prompts.PRODUCER,
-        prompts.producer_user(measure(group.pairs), _blocks(group.pairs)),
+        prompts.producer_user(measure(group.pairs), _blocks(group.pairs, cap)),
         role="inducer",
     ).text.strip()
     return Candidate(text=text or NAIVE, origin="producer")
@@ -142,7 +174,7 @@ def run_candidate(client: LLMClient, candidate: Candidate, group: PromptGroup,
 
 
 def critique(client: LLMClient, candidate: Candidate, group: PromptGroup,
-             scale: Scale) -> list[str]:
+             scale: Scale, cap: int = EXCERPT_CHARS) -> list[str]:
     """Ask what to change about the instruction, worst pair first."""
     from .parsing import parse_clauses
 
@@ -151,7 +183,7 @@ def critique(client: LLMClient, candidate: Candidate, group: PromptGroup,
     produced = candidate.outputs.get(worst_id, "")
 
     gap = describe_gap(pair.output, produced, scale)
-    user = prompts.critic_user(pair.input_text[:EXCERPT_CHARS], candidate.text,
+    user = prompts.critic_user(pair.input_text[:cap], candidate.text,
                                produced, pair.output)
     user += f"\n\nMEASURED DIFFERENCES between produced and wanted:\n{gap}"
     return parse_clauses(client.complete(prompts.CRITIC, user, role="inducer").text)
@@ -171,7 +203,8 @@ def revise(client: LLMClient, candidate: Candidate, changes: list[str],
 # ---------------------------------------------------------------------- loop
 
 def recover(client: LLMClient, group: PromptGroup, scale: Scale, *,
-            rounds: int = 2, verbose: bool = False) -> GroupResult:
+            rounds: int = 2, verbose: bool = False,
+            excerpt_chars: int = EXCERPT_CHARS) -> GroupResult:
     started = time.monotonic()
     stopped = "rounds exhausted"
 
@@ -186,12 +219,13 @@ def recover(client: LLMClient, group: PromptGroup, scale: Scale, *,
     history: list[Candidate] = []
     completed = 0
     try:
-        current = run_candidate(client, propose(client, group), group, scale)
+        current = run_candidate(client, propose(client, group, excerpt_chars),
+                                group, scale)
         history.append(current)
         say(f"  round 0 fidelity {current.fidelity:.4f}")
 
         for r in range(1, rounds + 1):
-            changes = critique(client, current, group, scale)
+            changes = critique(client, current, group, scale, excerpt_chars)
             if not changes:
                 stopped = "critic reported nothing to change"
                 break
@@ -232,7 +266,8 @@ def fit_scale(pairs: list[Pair]) -> Scale:
 
 def recover_all(client: LLMClient, groups: list[PromptGroup], *, rounds: int = 2,
                 scale: Scale | None = None, judge: bool = True,
-                verbose: bool = False) -> list[GroupResult]:
+                verbose: bool = False,
+                excerpt_chars: int = EXCERPT_CHARS) -> list[GroupResult]:
     all_pairs = [p for g in groups for p in g.pairs]
     scale = scale or fit_scale(all_pairs)
     results = []
@@ -240,7 +275,8 @@ def recover_all(client: LLMClient, groups: list[PromptGroup], *, rounds: int = 2
         if verbose:
             kind = "control set" if g.is_control else "single pair"
             print(f"{g.id} ({kind}, {len(g)} pair{'s' if len(g) > 1 else ''})")
-        r = recover(client, g, scale, rounds=rounds, verbose=verbose)
+        r = recover(client, g, scale, rounds=rounds, verbose=verbose,
+                    excerpt_chars=excerpt_chars)
         if judge:
             r = score_against_gold(client, r)
         results.append(r)

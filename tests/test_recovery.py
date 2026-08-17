@@ -562,3 +562,56 @@ def test_the_caller_is_told_when_a_param_is_dropped():
     c.on_unsupported = lambda param, model: seen.append((param, model))
     c.complete("s", "u")
     assert seen == [("temperature", "m")]
+
+
+# ------------------------------------------------------- the excerpt cap
+
+def test_nothing_in_the_shipped_set_is_truncated_at_the_default_cap(groups):
+    """The cap exists to bound cost, not to hide evidence. If this fails the
+    set has grown past what the producer can see and the number needs raising
+    -- or the group needs retrieval rather than a bigger window."""
+    assert recover.truncations(groups) == []
+
+
+def test_truncations_reports_what_is_cut_and_by_how_much():
+    g = PromptGroup(id="g", pairs=[
+        make_pair(id="short", input_text="a" * 50),
+        make_pair(id="long", input_text="b" * 130),
+    ])
+    cuts = recover.truncations([g], cap=100)
+    assert [c.pair_id for c in cuts] == ["long"]
+    assert cuts[0].lost == 30 and cuts[0].group_id == "g"
+
+
+def test_truncations_puts_the_worst_offender_first():
+    g = PromptGroup(id="g", pairs=[
+        make_pair(id="mild", input_text="a" * 110),
+        make_pair(id="severe", input_text="b" * 400),
+    ])
+    assert [c.pair_id for c in recover.truncations([g], cap=100)] == \
+        ["severe", "mild"]
+
+
+def test_the_cap_actually_limits_what_the_producer_is_shown():
+    pair = make_pair(input_text="head " + "x" * 500 + " TAIL")
+    assert "TAIL" in recover._blocks([pair], cap=10_000)
+    assert "TAIL" not in recover._blocks([pair], cap=100)
+
+
+def test_the_executor_sees_the_whole_document_regardless_of_the_cap():
+    """Only the producer and critic are capped. If the executor were capped
+    too, a truncated group would score badly for a second, hidden reason."""
+    pair = make_pair(input_text="head " + "x" * 500 + " TAIL")
+    group = PromptGroup(id="g", pairs=[pair])
+    seen = []
+
+    class Recorder(ObedientClient):
+        def complete(self, system, user, role="executor", **kw):
+            if role == "executor":
+                seen.append(user)
+            return super().complete(system, user, role=role, **kw)
+
+    scale = Scale.fit([pair.output])
+    recover.run_candidate(Recorder(), recover.Candidate(text="do it"), group,
+                          scale)
+    assert seen and all("TAIL" in u for u in seen)
