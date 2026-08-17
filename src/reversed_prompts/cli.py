@@ -235,6 +235,70 @@ def models(
             typer.echo(f"  {m}")
 
 
+def _retriever(backend: str, index_dir: pathlib.Path, real: bool):
+    from . import retrieval
+    from .embedding import HashEmbedder, OpenAIEmbedder
+    try:
+        embedder = OpenAIEmbedder() if real else HashEmbedder()
+    except RuntimeError as e:
+        raise typer.BadParameter(f"{e}. Use --no-real-embeddings to run "
+                                 f"offline with the hashing double.") from None
+    try:
+        return retrieval.build(backend, index_dir, embedder=embedder)
+    except ImportError:
+        raise typer.BadParameter(
+            "the 'lance' backend needs lancedb: pip install -e '.[rag]'"
+        ) from None
+
+
+@app.command()
+def index(
+    doc_id: str = typer.Argument(..., help="name to file this document under"),
+    path: pathlib.Path = typer.Argument(..., help="the document to index"),
+    backend: str = typer.Option("lance", help="lance | memory"),
+    real_embeddings: bool = typer.Option(
+        True, help="use the API; --no-real-embeddings uses the offline double"),
+    index_dir: pathlib.Path = typer.Option(None, help="where the index lives"),
+) -> None:
+    """Build a retrieval index for one document. Spends a little on embeddings."""
+    from . import retrieval
+    r = _retriever(backend, index_dir or retrieval.DEFAULT_INDEX_DIR,
+                   real_embeddings)
+    text = path.read_text(encoding="utf-8")
+    n = r.index(doc_id, text)
+    typer.echo(f"indexed {doc_id}: {len(text)} chars -> {n} chunks "
+               f"({r.embedder.model})")
+    typer.echo(f"  cache: {r.embedder.hits} hit(s), {r.embedder.misses} miss(es)")
+
+
+@app.command()
+def retrieve(
+    doc_id: str = typer.Argument(...),
+    query: str = typer.Argument(..., help="what to search for"),
+    k: int = typer.Option(5, help="how many chunks to keep before expanding"),
+    expand: int = typer.Option(1, help="neighbouring chunks to include per hit"),
+    chars: int = typer.Option(400, help="how much of each passage to print"),
+    backend: str = typer.Option("lance", help="lance | memory"),
+    real_embeddings: bool = typer.Option(True),
+    index_dir: pathlib.Path = typer.Option(None),
+) -> None:
+    """Search an indexed document. For inspecting retrieval quality by hand."""
+    from . import retrieval
+    r = _retriever(backend, index_dir or retrieval.DEFAULT_INDEX_DIR,
+                   real_embeddings)
+    try:
+        passages = r.search(doc_id, text=query, k=k, expand=expand)
+    except KeyError as e:
+        raise typer.BadParameter(str(e)) from None
+    if not passages:
+        typer.echo("no passages matched")
+        return
+    for p in passages:
+        typer.echo(f"\n{'-' * 78}\n{p.cite()}  score {p.score:.4f}  "
+                   f"chunks {list(p.ordinals)}\n{'-' * 78}")
+        typer.echo(p.text[:chars] + ("..." if len(p.text) > chars else ""))
+
+
 @app.command()
 def show_prompts() -> None:
     """Print the system's own instructions -- the ones we author, not recover."""

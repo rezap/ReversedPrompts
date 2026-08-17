@@ -249,7 +249,44 @@ the prompt"*, and those must not be confused. Raise it with `--excerpt-chars N`.
 
 A cap is the wrong tool once inputs get genuinely long — the evidence for an output sits
 wherever it happens to be, and a prefix keeps the first N characters regardless. That is
-what retrieval is for; see §8 of the design doc.
+what retrieval is for.
+
+### Retrieval
+
+Built, inspectable, and **not yet wired into the recovery loop**. Nothing about how
+prompts are recovered has changed.
+
+```bash
+pip install -e '.[rag]'                       # adds lancedb
+revprompt index odyssey data/source/odyssey-pg1727.txt
+revprompt retrieve odyssey "Antinous the ringleader of the suitors" --expand 1
+```
+
+Hybrid: BM25 full-text and vector search, fused by reciprocal rank. Both are needed
+because the tasks span both ends — *"name the main antagonist"* turns on a rare token that
+keyword search nails and embeddings blur, while *"summarise this in three sentences"* has
+no rare token at all. LanceDB is embedded and file-based; no server, no cloud service.
+
+Embeddings use their own `$REVPROMPT_EMBEDDING_MODEL`, deliberately not the shared
+`$REVPROMPT_MODEL` — a blanket chat-model setting must not silently become the embedding
+model. Vectors are cached on disk by `(model, text)`, so re-indexing an unchanged document
+is free and changing the model can never mix two models' vectors in one index.
+
+The index lives in `data/index/` and is gitignored. Rebuild it with `revprompt index`.
+
+**Retrieval quality is not yet established.** Measured on the full Odyssey with the
+*offline* hashing embedder, precision@5 for `"Antinous the ringleader of the suitors"`:
+
+| | precision@5 |
+|---|---|
+| keyword only | 5/5 |
+| vector only | 0/5 |
+| equal-weight fusion | **3/5** |
+
+Fusion made the good retriever worse by averaging in a bad one. That says the offline
+double has no semantics — which is expected and documented — but it is also the reason
+`fuse()` takes weights, and the reason the same measurement has to be repeated against
+real embeddings before retrieval is trusted with anything.
 
 The models are checked against the API before any call is made, so a wrong id fails
 immediately with a list of close matches rather than dying part-way through a run.
