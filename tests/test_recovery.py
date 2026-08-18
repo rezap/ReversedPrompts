@@ -723,3 +723,95 @@ def test_the_summary_counts_contaminated_groups(groups, scale):
     assert s["contaminated_groups"] == 1
     assert s["mean_prompt_similarity"] == pytest.approx(0.9), \
         "similarity itself is untouched by the flag"
+
+
+# ------------------------------------------------- comparability across runs
+
+def test_the_scale_is_the_same_whether_one_group_or_all_of_them_ran(pairs, groups):
+    """The bug this fixes: fitting on the selected pairs made `run --group X`
+    and `run` report different fidelity for the identical output, with nothing
+    recording that two different scales were involved."""
+    from reversed_prompts.metrics import tier1
+
+    g = next(x for x in groups if x.id == "ody-stake-material")
+    whole = recover.fit_scale(pairs)
+    subset = recover.fit_scale(g.pairs)
+
+    candidate = "The stake was made of ash."
+    gold = g.pairs[0].output
+    assert tier1(gold, candidate, whole)[0] != pytest.approx(
+        tier1(gold, candidate, subset)[0]), "the two scales really do differ"
+
+    # what the CLI now does: fit on the file, regardless of what was selected
+    assert recover.fit_scale(pairs).fingerprint == whole.fingerprint
+
+
+def test_a_scale_records_which_corpus_it_was_fitted_on(pairs):
+    scale = recover.fit_scale(pairs)
+    assert scale.sample_size == len(pairs)
+    assert scale.fingerprint.startswith("sha256:")
+
+
+def test_the_fingerprint_ignores_order_but_not_content():
+    """Reordering the pair file is not a different corpus. Editing a gold
+    output is."""
+    from reversed_prompts.metrics import fingerprint
+
+    assert fingerprint(["a", "b"]) == fingerprint(["b", "a"])
+    assert fingerprint(["a", "b"]) != fingerprint(["a", "b", "c"])
+    assert fingerprint(["a", "b"]) != fingerprint(["a", "B"])
+
+
+def test_a_result_carries_the_model_and_the_scale_it_was_scored_under(groups, scale):
+    """Without this a stored score cannot be attributed to anything, which
+    client.py's own docstring calls a hard requirement."""
+    client = ObedientClient()
+    client.models = {"executor": "obedient-x", "judge": "obedient-x"}
+    r = recover.recover(client, groups[0], scale, rounds=0)
+    assert r.models == {"executor": "obedient-x", "judge": "obedient-x"}
+    assert r.scale_fingerprint == scale.fingerprint
+    assert r.scoring_version and r.prompts_version
+
+
+def test_scoring_version_is_separate_from_the_prompt_version():
+    """A score can move because the judge was re-worded or because the
+    arithmetic changed. One stamp cannot distinguish those."""
+    from reversed_prompts.metrics import SCORING_VERSION
+    assert SCORING_VERSION != prompts.VERSION
+
+
+def test_a_group_scores_the_same_alone_as_it_does_among_others(groups, scale):
+    """The end-to-end version of the claim, which the unit tests missed.
+
+    Fixing the scale was necessary but not sufficient: the offline double
+    cached its vocabulary from the first document it ever saw, so a group's
+    simulated output -- and therefore its score -- depended on which groups
+    ran before it. Two independent run-order dependencies, one hidden behind
+    the other.
+    """
+    target = next(g for g in groups if g.id == "ody-stake-material")
+
+    alone = recover.recover(ObedientClient(), target, scale, rounds=0)
+
+    client = ObedientClient()
+    for g in groups:                       # warm the double on other groups
+        if g.id == target.id:
+            among_others = recover.recover(client, g, scale, rounds=0)
+            break
+        recover.recover(client, g, scale, rounds=0)
+
+    assert alone.best.fidelity == pytest.approx(among_others.best.fidelity)
+    assert alone.best.per_pair == among_others.best.per_pair
+
+
+def test_the_offline_double_keeps_one_vocabulary_per_document():
+    """Documents are long here because the pool samples every seventh word --
+    a four-word toy document yields one token and two of them look identical
+    for the wrong reason."""
+    c = ObedientClient()
+    doc_a = "<document>\n" + " ".join(f"alpha{i}" for i in range(60)) + "\n</document>"
+    doc_b = "<document>\n" + " ".join(f"omega{i}" for i in range(60)) + "\n</document>"
+
+    first, second = c._load_pool(doc_a), c._load_pool(doc_b)
+    assert len(first) > 1 and first != second
+    assert c._load_pool(doc_a) == first, "the same document keeps its pool"
