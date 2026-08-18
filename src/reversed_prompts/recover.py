@@ -35,7 +35,7 @@ from .client import BudgetExceeded, LLMClient
 from .features import extract, infer_shape
 from .ingest import Pair, PromptGroup
 from .metrics import Scale, describe_gap, tier1
-from .similarity import PromptScore, score_prompt
+from .similarity import MAX_JUDGE_ATTEMPTS, PromptScore, score_prompt
 
 EXCERPT_CHARS = 8092        # per document, in the producer and critic prompts
 NAIVE = "Answer the question about the document above."
@@ -249,14 +249,25 @@ def recover(client: LLMClient, group: PromptGroup, scale: Scale, *,
                        stopped_because=stopped)
 
 
-def score_against_gold(client: LLMClient, result: GroupResult) -> GroupResult:
+def score_against_gold(client: LLMClient, result: GroupResult, *,
+                       judge_attempts: int = MAX_JUDGE_ATTEMPTS) -> GroupResult:
     """Attach the prompt-similarity score. Uses the gold prompt, so it runs
-    only after recovery is finished -- never inside the loop."""
+    only after recovery is finished -- never inside the loop.
+
+    A judge that will not answer in the required format raises out of here.
+    That aborts the run, which is the intended behaviour: a fabricated score is
+    worse than a failed run, because nothing downstream can tell it apart from
+    a real one.
+    """
     golds = [p.output for p in result.group.pairs]
     result.best.prompt_score = score_prompt(
-        client, result.best.text, result.group.gold_prompt, golds)
+        client, result.best.text, result.group.gold_prompt, golds,
+        max_attempts=judge_attempts,
+        context=f"group {result.group.id} (recovered prompt)")
     result.naive.prompt_score = score_prompt(
-        client, result.naive.text, result.group.gold_prompt, golds)
+        client, result.naive.text, result.group.gold_prompt, golds,
+        max_attempts=judge_attempts,
+        context=f"group {result.group.id} (naive baseline)")
     return result
 
 
@@ -267,7 +278,8 @@ def fit_scale(pairs: list[Pair]) -> Scale:
 def recover_all(client: LLMClient, groups: list[PromptGroup], *, rounds: int = 2,
                 scale: Scale | None = None, judge: bool = True,
                 verbose: bool = False,
-                excerpt_chars: int = EXCERPT_CHARS) -> list[GroupResult]:
+                excerpt_chars: int = EXCERPT_CHARS,
+                judge_attempts: int = MAX_JUDGE_ATTEMPTS) -> list[GroupResult]:
     all_pairs = [p for g in groups for p in g.pairs]
     scale = scale or fit_scale(all_pairs)
     results = []
@@ -278,7 +290,7 @@ def recover_all(client: LLMClient, groups: list[PromptGroup], *, rounds: int = 2
         r = recover(client, g, scale, rounds=rounds, verbose=verbose,
                     excerpt_chars=excerpt_chars)
         if judge:
-            r = score_against_gold(client, r)
+            r = score_against_gold(client, r, judge_attempts=judge_attempts)
         results.append(r)
     return results
 
@@ -296,4 +308,10 @@ def summarise(results: list[GroupResult]) -> dict[str, float]:
     if judged:
         out["mean_prompt_similarity"] = statistics.fmean(judged)
         out["max_contamination"] = max(contam)
+        # Counted, not averaged in. One contaminated prompt among twelve clean
+        # ones barely moves a mean, and is the single most important thing to
+        # notice in the run.
+        out["contaminated_groups"] = float(sum(
+            r.best.prompt_score.contaminated for r in results
+            if r.best.prompt_score))
     return out

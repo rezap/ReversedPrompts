@@ -15,7 +15,7 @@ Bump it whenever the text below changes in a way that could move a score.
 """
 from __future__ import annotations
 
-VERSION = "2026-08-11.1"
+VERSION = "2026-08-17.1"
 
 
 PRODUCER = """\
@@ -71,14 +71,28 @@ new document: the same task, the same handling of edge cases, the same output \
 format and length where those are specified. Wording, ordering and politeness \
 do not matter.
 
-Reply with a single integer 0-10:
-- 10: same behaviour in every respect
-- 7-9: same task and edge-case handling, minor differences in stated format or detail
-- 4-6: same task, but would diverge on format, length, or an edge case
-- 1-3: related but would behave differently on most documents
-- 0: different tasks
+Reply with a single decimal number between 0.00 and 1.00, to exactly two \
+decimal places:
+- 1.00: same behaviour in every respect
+- 0.70-0.99: same task and edge-case handling, minor differences in stated \
+format or detail
+- 0.40-0.69: same task, but would diverge on format, length, or an edge case
+- 0.10-0.39: related but would behave differently on most documents
+- 0.00: different tasks
 
-Reply with the integer only.\
+Your entire reply must be that number and nothing else. No words, no \
+explanation, no percent sign, no range. Examples of valid replies: 0.00, 0.35, \
+0.90, 1.00.\
+"""
+
+
+SIMILARITY_RETRY = """\
+Your previous reply was not in the required format:
+
+{reply!r}
+
+Reply with a single decimal number between 0.00 and 1.00, to exactly two \
+decimal places, and nothing else. For example: 0.65\
 """
 
 
@@ -107,3 +121,15 @@ def reviser_user(candidate: str, changes: list[str]) -> str:
 
 def similarity_user(recovered: str, gold: str) -> str:
     return f"INSTRUCTION A:\n{recovered}\n\nINSTRUCTION B:\n{gold}"
+
+
+def similarity_retry_user(recovered: str, gold: str, reply: str) -> str:
+    """Re-ask, quoting what came back.
+
+    Resending the identical prompt after a malformed reply tends to produce an
+    identical malformed reply -- the model is not being contrary, it read the
+    instruction the way it read it the first time. Showing it what it actually
+    said is what changes the second attempt.
+    """
+    return (similarity_user(recovered, gold) + "\n\n"
+            + SIMILARITY_RETRY.format(reply=reply[:200]))
