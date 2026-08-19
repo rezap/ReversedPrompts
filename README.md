@@ -165,8 +165,11 @@ missed gold — and edits the spec in the opposite semantic direction.
 **Roles, not one model.** Four distinct jobs with different cost/quality profiles: a
 frontier reasoner to hypothesize and refine, a mid-tier executor that runs every candidate
 over every doc (the cost center), a cheap model for structural feature extraction, and a
-judge. The judge must never be the model that proposed — otherwise the loop optimizes
-toward the judge's quirks rather than toward quality.
+judge. Each role is selected separately, and the judge is *preferably* not the model that
+proposed — a judge sharing the inducer's blind spots lets the loop optimize toward those
+quirks and call it quality. Today every role defaults to the same model; that is allowed,
+`run` warns once when it happens, and each result records `judge_independent` so the
+caveat travels with the number.
 
 **Spend is a first-class constraint.** The evaluation cascade exists so expensive judgment
 is rationed to candidates that already survived free filtering:
@@ -252,9 +255,16 @@ revprompt models --available              # what this key can actually use
 export REVPROMPT_MODEL=some-other-model   # all four roles
 export REVPROMPT_MODEL_JUDGE=...          # just the judge
 revprompt run --model ... --group ...     # one run only, beats both env vars
+revprompt run --model A --judge-model B   # judge on B, everything else on A
 ```
 
-Precedence is `--model` → `$REVPROMPT_MODEL_<ROLE>` → `$REVPROMPT_MODEL` → default.
+Precedence is `--judge-model` (judge only) → `--model` → `$REVPROMPT_MODEL_<ROLE>` →
+`$REVPROMPT_MODEL` → default.
+
+Roles are configured one at a time on purpose. `--model` is the shorthand that sets them
+together, and it does cover the judge — "use this model" meaning "use it for three of the
+four" would be the worse surprise. When the judge ends up on the inducer's model, `run`
+says so before it spends anything and writes `judge_independent: false` into the result.
 
 ### How much of the document the system sees
 

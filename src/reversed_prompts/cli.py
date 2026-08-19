@@ -10,7 +10,7 @@ import typer
 
 from . import ingest, prompts, recover
 from .client import (DEFAULT_MODEL, ObedientClient, OpenAIClient,
-                     UnknownModel, resolve_models)
+                     UnknownModel, judge_is_independent, resolve_models)
 from .features import ALL_KEYS, extract
 from .metrics import SCORING_VERSION, tier1
 from .similarity import MAX_JUDGE_ATTEMPTS, JudgeFormatError
@@ -56,13 +56,37 @@ def _warn_truncated(cuts: list[recover.Truncation], total_pairs: int) -> None:
     typer.echo(f"{bar}\n", err=True)
 
 
-def _client(simulate: bool, model: str | None, budget: int | None):
+def _warn_shared_judge(models: dict[str, str]) -> None:
+    """Say once that the judge and the inducer are the same model.
+
+    Not fatal. A shared judge is a caveat on the prompt-match number, not a
+    broken run -- but it is a caveat that has to travel with the number, so it
+    is printed here and recorded in the JSON rather than left to be inferred
+    from the model list.
+    """
+    typer.echo(f"\nnote: judge and inducer are both {models['judge']}.",
+               err=True)
+    typer.echo("      A judge sharing the inducer's model shares its blind "
+               "spots, so the", err=True)
+    typer.echo("      prompt-match number is a weaker signal than it looks. "
+               "Select the", err=True)
+    typer.echo("      judge on its own with --judge-model MODEL or "
+               "$REVPROMPT_MODEL_JUDGE.\n", err=True)
+
+
+def _client(simulate: bool, model: str | None, budget: int | None,
+            judge_model: str | None = None):
     if simulate:
         return ObedientClient()
     overrides = {r: model for r in ("executor", "inducer", "judge", "features")} \
-        if model else None
+        if model else {}
+    # After --model, so "use this model, but judge with that one" works. The
+    # roles are selected separately by design; --model is the shorthand that
+    # sets them together.
+    if judge_model:
+        overrides["judge"] = judge_model
     try:
-        return OpenAIClient(models=overrides, max_tokens_budget=budget,
+        return OpenAIClient(models=overrides or None, max_tokens_budget=budget,
                             on_unsupported=_warn_dropped)
     except UnknownModel as e:
         raise typer.BadParameter(str(e)) from None
@@ -157,6 +181,9 @@ def run(
         help="how many times to re-ask a judge that replies in the wrong format"),
     show_outputs: bool = typer.Option(False, help="print produced vs wanted text"),
     model: Optional[str] = typer.Option(None, help="override every role"),
+    judge_model: Optional[str] = typer.Option(
+        None, help="the judge only; beats --model. Prefer a model other than "
+                   "the one that proposed"),
     budget: Optional[int] = typer.Option(400_000, help="hard token ceiling"),
     excerpt_chars: int = typer.Option(
         recover.EXCERPT_CHARS,
@@ -184,11 +211,15 @@ def run(
     # scales.
     scale = recover.fit_scale(ingest.load(pairs_path))
 
-    client = _client(simulate, model, budget)
+    client = _client(simulate, model, budget, judge_model)
     typer.echo(f"{len(gs)} group(s), system prompts v{prompts.VERSION}, "
                f"scoring v{SCORING_VERSION}, excerpt cap {excerpt_chars}")
     typer.echo(f"scale fitted on {scale.sample_size} gold output(s) "
                f"[{scale.fingerprint}]\n")
+
+    independent = judge_is_independent(getattr(client, "models", {}))
+    if judge and independent is False:
+        _warn_shared_judge(client.models)
 
     try:
         results = recover.recover_all(client, gs, rounds=rounds, judge=judge,
@@ -231,6 +262,10 @@ def run(
             "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "models": getattr(client, "models", {"all": getattr(
                 client, "model", client.__class__.__name__)}),
+            # null when the client does not map models to roles. The caveat
+            # belongs next to the score it qualifies: read months later, the
+            # model list alone no longer says whether that mattered.
+            "judge_independent": independent,
             "embedding_model": None,     # retrieval is not in the loop yet
             "usage": {
                 "calls": u.calls,
@@ -271,10 +306,16 @@ def models(
 ) -> None:
     """Show which model each role will use. --available needs a key."""
     typer.echo(f"default: {DEFAULT_MODEL}\n")
-    for role, m in resolve_models().items():
+    resolved = resolve_models()
+    for role, m in resolved.items():
         typer.echo(f"  {role:<10} {m}")
     typer.echo("\nOverride with --model, $REVPROMPT_MODEL, "
                "or $REVPROMPT_MODEL_<ROLE>.")
+    if judge_is_independent(resolved) is False:
+        typer.echo("\nnote: the judge and the inducer resolve to the same "
+                   "model. That is allowed, but a\n      judge with the "
+                   "inducer's blind spots is a weaker check. Prefer "
+                   "$REVPROMPT_MODEL_JUDGE\n      or --judge-model.")
     if available:
         try:
             client = OpenAIClient(verify_models=False)

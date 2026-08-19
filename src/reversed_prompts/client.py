@@ -96,6 +96,24 @@ def resolve_models(overrides: dict[str, str] | None = None,
     return out
 
 
+def judge_is_independent(models: dict[str, str]) -> bool | None:
+    """Is the judge a different model from the one that proposed?
+
+    Preferred rather than required. A judge that shares the inducer's model
+    shares its blind spots, so the loop can optimise toward those quirks and
+    call the result quality. That is a caveat on the number, not a reason to
+    refuse to produce one -- which is why this reports rather than raises, and
+    why the answer is recorded next to the score instead of only warned about.
+
+    Returns `None` when the mapping does not name a model per role (the offline
+    double, say): unknown is not the same as shared, and recording `False` for
+    a client that has no roles to share would be a claim we cannot support.
+    """
+    if not models or "judge" not in models or "inducer" not in models:
+        return None
+    return models["judge"] != models["inducer"]
+
+
 class OpenAIClient:
     """Real calls. Roles map to model IDs through `models`.
 

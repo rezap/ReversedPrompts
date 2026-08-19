@@ -201,12 +201,16 @@ Two scoring guards that matter more than the metrics themselves:
 - **Length/generality regularizer (MDL-flavored).** Among candidates within noise of each
   other, prefer the shortest and most general. Directly counters underdetermination.
 
-**Judge independence.** Never let the same model both propose and judge in the same round
-— you optimize toward the judge's quirks. On a single-vendor stack (§7) the strong version
+**Judge independence.** Avoid letting the same model both propose and judge in the same
+round — you optimize toward the judge's quirks. On a single-vendor stack (§7) the strong version
 of this — a judge from a **different model family** — is not available without a second
 integration, so the weaker version has to carry more: a different model *tier* as judge
 than as inducer, and correspondingly more weight on Tier 1 deterministic signal. This is
-the one real cost of going OpenAI-only; see §7. Calibrate against a small human-labeled set
+the one real cost of going OpenAI-only; see §7. *As shipped*, every role defaults to the
+same model and a shared judge is permitted rather than blocked: `run` warns once and stamps
+`judge_independent` on the result, so a number produced under a shared judge stays
+identifiable as one. `--judge-model` and `$REVPROMPT_MODEL_JUDGE` select the judge on its
+own. Calibrate against a small human-labeled set
 periodically. Report judge–human agreement as a first-class metric; if it drifts, the
 whole optimization is measuring noise.
 
