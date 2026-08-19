@@ -15,6 +15,7 @@ own magnitude.
 """
 from __future__ import annotations
 
+import hashlib
 import statistics
 from dataclasses import dataclass
 
@@ -28,12 +29,43 @@ WEIGHT_SHAPE = 0.30
 WEIGHT_STRUCTURE = 0.40
 WEIGHT_STYLE = 0.30
 
+# Bumped whenever a change alters what a score *means*, as opposed to what the
+# system does. Separate from prompts.VERSION, which tracks instruction text: a
+# score can move because the judge was re-worded or because the arithmetic
+# changed, and telling those apart later is the whole point of stamping both.
+SCORING_VERSION = "2026-08-18.1"
+
+
+def fingerprint(gold_texts: list[str]) -> str:
+    """Identify a corpus of gold outputs, order-independently.
+
+    Sorted before hashing because the pair *file order* is not part of what a
+    scale is fitted on -- reordering the file must not look like a different
+    corpus, while adding or editing a gold output must.
+    """
+    h = hashlib.sha256()
+    for text in sorted(gold_texts):
+        h.update(text.encode())
+        h.update(b"\x00")
+    return f"sha256:{h.hexdigest()[:16]}"
+
 
 @dataclass(frozen=True)
 class Scale:
-    """Per-feature normalizer, fitted on the gold outputs of a corpus."""
+    """Per-feature normalizer, fitted on the gold outputs of a corpus.
+
+    **Which corpus matters, and it is not obvious.** Every score is a distance
+    divided by this spread, so two runs fitted on different sets of gold
+    outputs produce numbers that cannot be compared -- the same output scored
+    0.8421 against the whole corpus and 0.6095 against one group's three pairs.
+    `fingerprint` is what makes that detectable after the fact instead of
+    quietly wrong: it identifies the corpus a stored result was normalised
+    against.
+    """
 
     spread: dict[str, float]
+    fingerprint: str = ""
+    sample_size: int = 0
 
     @classmethod
     def fit(cls, gold_texts: list[str]) -> "Scale":
@@ -46,7 +78,8 @@ class Scale:
             # feature that is 0 across the whole corpus cannot divide by zero
             magnitude = statistics.fmean([abs(v) for v in vals]) if vals else 0.0
             spread[key] = max(sd, 0.10 * magnitude, 1e-6)
-        return cls(spread)
+        return cls(spread, fingerprint=fingerprint(gold_texts),
+                   sample_size=len(gold_texts))
 
     def normalized_diff(self, a: Features, b: Features, key: str) -> float:
         return min(abs(a[key] - b[key]) / self.spread[key], CLIP)

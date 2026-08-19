@@ -286,20 +286,29 @@ class ObedientClient:
     def __init__(self, model: str = "obedient"):
         self.usage = Usage()
         self.calls: list[tuple[str, str, str]] = []
-        self._pool: list[str] = []
+        self._pools: dict[int, list[str]] = {}
 
     # ---------------------------------------------------------------- helpers
 
-    def _load_pool(self, user: str) -> None:
-        import re as _re
-        if self._pool:
-            return
-        doc = user.split("</document>")[0]
-        words = _re.findall(r"[A-Za-z][A-Za-z'-]{2,}", doc)
-        self._pool = words[::7][:4000] or list(self.FALLBACK)
+    def _load_pool(self, user: str) -> list[str]:
+        """Vocabulary for this document, cached *per document*.
 
-    def _words(self, n: int, offset: int = 0) -> str:
-        pool = self._pool or self.FALLBACK
+        Caching one pool for the whole run made a group's simulated output
+        depend on which groups happened to run before it: `run --group X` and
+        `run` produced different text for X, and therefore different scores.
+        That is the same run-order dependence the scoring fix removes, hiding
+        in the double.
+        """
+        import re as _re
+        doc = user.split("</document>")[0]
+        key = hash(doc)
+        if key not in self._pools:
+            words = _re.findall(r"[A-Za-z][A-Za-z'-]{2,}", doc)
+            self._pools[key] = words[::7][:4000] or list(self.FALLBACK)
+        return self._pools[key]
+
+    def _words(self, n: int, offset: int = 0, pool: list[str] | None = None) -> str:
+        pool = pool or list(self.FALLBACK)
         return " ".join(pool[(offset * 97 + i * 13) % len(pool)]
                         for i in range(max(n, 1)))
 
@@ -333,7 +342,7 @@ class ObedientClient:
 
     def _execute(self, user: str) -> str:
         import re as _re
-        self._load_pool(user)
+        pool = self._load_pool(user)
         doc, _, instruction = user.partition("</document>")
 
         # Deliberately no NA handling. Deciding whether a document contains
@@ -357,17 +366,19 @@ class ObedientClient:
         if "markdown table" in instruction:
             rows = max(target // 12, 2)
             return "\n".join(["| Aspect | Detail |", "|---|---|"]
-                             + [f"| {self._words(2, i)} | {self._words(6, i)} |"
+                             + [f"| {self._words(2, i, pool)} | "
+                                f"{self._words(6, i, pool)} |"
                                 for i in range(rows)])
         if "bulleted list" in instruction:
             items = max(target // 10, 3)
-            return "\n".join(f"- {self._words(10, i)}." for i in range(items))
+            return "\n".join(f"- {self._words(10, i, pool)}." for i in range(items))
         if sent_match:
             n = int(sent_match.group(1))
             per = max(target // n, 6)
-            return " ".join(f"{self._words(per, i).capitalize()}." for i in range(n))
+            return " ".join(f"{self._words(per, i, pool).capitalize()}."
+                            for i in range(n))
         n = max(target // per_sentence, 1)
-        return " ".join(f"{self._words(per_sentence, i).capitalize()}."
+        return " ".join(f"{self._words(per_sentence, i, pool).capitalize()}."
                         for i in range(n))
 
     @staticmethod

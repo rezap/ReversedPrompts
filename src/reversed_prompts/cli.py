@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+from datetime import datetime, timezone
 from typing import Optional
 
 import typer
@@ -11,7 +12,7 @@ from . import ingest, prompts, recover
 from .client import (DEFAULT_MODEL, ObedientClient, OpenAIClient,
                      UnknownModel, resolve_models)
 from .features import ALL_KEYS, extract
-from .metrics import tier1
+from .metrics import SCORING_VERSION, tier1
 from .similarity import MAX_JUDGE_ATTEMPTS, JudgeFormatError
 
 app = typer.Typer(add_completion=False, help=__doc__)
@@ -176,13 +177,23 @@ def run(
     if cuts:
         _warn_truncated(cuts, sum(len(g) for g in gs))
 
+    # Fitted on every pair in the file, not on the selected ones. Feature
+    # distances are divided by the spread of this corpus, so fitting on a
+    # subset would make `run --group X` and `run` report different numbers for
+    # the same output -- and nothing downstream could tell they were different
+    # scales.
+    scale = recover.fit_scale(ingest.load(pairs_path))
+
     client = _client(simulate, model, budget)
     typer.echo(f"{len(gs)} group(s), system prompts v{prompts.VERSION}, "
-               f"excerpt cap {excerpt_chars}\n")
+               f"scoring v{SCORING_VERSION}, excerpt cap {excerpt_chars}")
+    typer.echo(f"scale fitted on {scale.sample_size} gold output(s) "
+               f"[{scale.fingerprint}]\n")
 
     try:
         results = recover.recover_all(client, gs, rounds=rounds, judge=judge,
-                                      verbose=True, excerpt_chars=excerpt_chars,
+                                      scale=scale, verbose=True,
+                                      excerpt_chars=excerpt_chars,
                                       judge_attempts=judge_attempts)
     except JudgeFormatError as e:
         # Deliberately fatal: a fabricated similarity score is indistinguishable
@@ -209,8 +220,30 @@ def run(
     typer.echo(f"  usage                 {client.usage.summary()}")
 
     if out:
+        # Everything needed to say what produced these numbers. A stored score
+        # with no model attached cannot be compared with anything -- and the
+        # provenance has to be written when the score is, because retrofitting
+        # it afterwards means guessing.
+        u = client.usage
         out.write_text(json.dumps({
+            "scoring_version": SCORING_VERSION,
             "prompts_version": prompts.VERSION,
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "models": getattr(client, "models", {"all": getattr(
+                client, "model", client.__class__.__name__)}),
+            "embedding_model": None,     # retrieval is not in the loop yet
+            "usage": {
+                "calls": u.calls,
+                "prompt_tokens": u.prompt_tokens,
+                "completion_tokens": u.completion_tokens,
+                "cached_tokens": u.cached_tokens,
+                "by_model": u.by_model,
+            },
+            "scale_corpus": {
+                "path": str(pairs_path),
+                "gold_outputs": scale.sample_size,
+                "fingerprint": scale.fingerprint,
+            },
             "excerpt_chars": excerpt_chars,
             "truncated_inputs": [c.pair_id for c in cuts],
             "summary": s,

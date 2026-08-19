@@ -79,6 +79,13 @@ The loop optimises output fidelity, because that is the only signal available wi
 peeking at the answer. Prompt match is computed afterwards, never inside the loop — the
 gold prompt must not reach the producer or the critic, and a test asserts it does not.
 
+**Scores are comparable across runs.** Feature distances are divided by how much each
+feature varies across the gold corpus, so that normaliser is always fitted on *every* pair
+in the file — never on the subset you selected with `--group`. Otherwise the same output
+would score differently depending on what else you ran. Every stored result carries the
+models, the token usage, the scoring version and a fingerprint of the corpus it was
+normalised against, so two results can be checked for comparability rather than assumed.
+
 Contamination is reported separately and never averaged in. A prompt containing the answer
 scores beautifully on the other two and is worthless, so it is **flagged and counted**
 rather than subtracted from the similarity score — subtracting it would hide the very

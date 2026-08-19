@@ -77,9 +77,9 @@ summary and the JSON, using the existing 0.05 threshold. Keeps the design's
 
 ## PR B — A stored result can be trusted across runs
 
-**Status: `[ ]` not started**
+**Status: `[x]` done — PR pending review**
 
-### B1 `[ ]` Fit the feature scale on the whole corpus, always
+### B1 `[x]` Fit the feature scale on the whole corpus, always
 
 `fit_scale` normalises by spread across the *selected* pairs, so the same
 candidate output scores differently depending on which groups ran:
@@ -94,7 +94,7 @@ CLI should fit on every pair in the file regardless of `--group`,
 `--category` or `--controls-only`. `recover_all` keeps its `scale=` parameter
 for library use.
 
-### B2 `[ ]` Record what produced the numbers
+### B2 `[x]` Record what produced the numbers
 
 The JSON has no model, though the README claims otherwise and `client.py`'s own
 docstring calls attribution a hard requirement. Add `models`, `usage`,
@@ -102,13 +102,22 @@ docstring calls attribution a hard requirement. Add `models`, `usage`,
 pair count and a fingerprint (hash of the sorted gold outputs) so a later run
 can detect that two results were fitted on different corpora.
 
-### B3 `[ ]` Add `SCORING_VERSION`
+### B3 `[x]` Add `SCORING_VERSION`
 
 PRs A and B both change what a score means. A version constant stamped on every
 result is how a number from last week stays interpretable. Separate from
 `prompts.VERSION`, which tracks instruction text.
 
 **Note:** results from before A+B are not comparable with results after.
+
+### B4 `[x]` The offline double had the same bug, one level down
+
+Found by checking end to end rather than trusting the unit tests. After fixing
+the scale, `run --group X` and `run` *still* disagreed: `ObedientClient` cached
+its vocabulary pool from the first document it ever saw, so a group's simulated
+output depended on which groups ran before it. Two independent run-order
+dependencies, one hiding behind the other. The pool is now keyed per document,
+and a test pins the end-to-end property rather than only its parts.
 
 ---
 

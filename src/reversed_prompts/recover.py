@@ -34,7 +34,7 @@ from . import prompts
 from .client import BudgetExceeded, LLMClient
 from .features import extract, infer_shape
 from .ingest import Pair, PromptGroup
-from .metrics import Scale, describe_gap, tier1
+from .metrics import SCORING_VERSION, Scale, describe_gap, tier1
 from .similarity import MAX_JUDGE_ATTEMPTS, PromptScore, score_prompt
 
 EXCERPT_CHARS = 8092        # per document, in the producer and critic prompts
@@ -67,6 +67,12 @@ class GroupResult:
     seconds: float = 0.0
     stopped_because: str = "rounds exhausted"
     prompts_version: str = prompts.VERSION
+    scoring_version: str = SCORING_VERSION
+    # Which model produced this, and which corpus the score was normalised
+    # against. Carried on the result rather than reconstructed later, because
+    # later there is nothing left to reconstruct it from.
+    models: dict[str, str] = field(default_factory=dict)
+    scale_fingerprint: str = ""
 
     @property
     def beats_naive(self) -> bool:
@@ -246,7 +252,9 @@ def recover(client: LLMClient, group: PromptGroup, scale: Scale, *,
     best = max(history) if history else naive
     return GroupResult(group=group, best=best, naive=naive, history=history,
                        rounds=completed, seconds=time.monotonic() - started,
-                       stopped_because=stopped)
+                       stopped_because=stopped,
+                       models=dict(getattr(client, "models", {})),
+                       scale_fingerprint=scale.fingerprint)
 
 
 def score_against_gold(client: LLMClient, result: GroupResult, *,
