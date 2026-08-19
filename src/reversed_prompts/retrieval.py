@@ -29,7 +29,7 @@ import re
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from .chunking import Chunk, chunk_text, merge_spans
+from .chunking import Chunk, PageMap, chunk_text, merge_spans
 from .embedding import CachedEmbedder, Embedder, HashEmbedder
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -51,9 +51,22 @@ class Passage:
     end: int
     score: float
     ordinals: tuple[int, ...]
+    pages: tuple[int, int] | None = None
 
     def cite(self) -> str:
-        return f"{self.doc_id}[{self.start}:{self.end}]"
+        """Where this came from, in the terms the reader has.
+
+        Character offsets are exact and useless to a person holding a 900-page
+        PDF. When a page map is available the citation leads with pages and
+        keeps the offsets, so the passage can be found by hand *and* checked
+        mechanically against the source.
+        """
+        where = f"{self.doc_id}[{self.start}:{self.end}]"
+        if self.pages is None:
+            return where
+        first, last = self.pages
+        page = f"p. {first}" if first == last else f"pp. {first}-{last}"
+        return f"{self.doc_id} {page} [{self.start}:{self.end}]"
 
 
 def reciprocal_rank_fusion(rankings: list[list[str]], k: int = RRF_K,
@@ -106,7 +119,8 @@ def fuse(rankings: list[list[str]], k: int = RRF_K,
 
 @runtime_checkable
 class Retriever(Protocol):
-    def index(self, doc_id: str, text: str) -> int:
+    def index(self, doc_id: str, text: str,
+              pages: PageMap | None = None) -> int:
         ...
 
     def search(self, doc_id: str, *, text: str, k: int = 8,
@@ -132,6 +146,7 @@ class _BaseRetriever:
         self.target_chars = target_chars
         self._sources: dict[str, str] = {}
         self._chunks: dict[str, list[Chunk]] = {}
+        self._pages: dict[str, PageMap | None] = {}
 
     # ------------------------------------------------------------- storage
 
@@ -139,18 +154,24 @@ class _BaseRetriever:
         safe = re.sub(r"[^A-Za-z0-9_.-]", "_", doc_id)
         return self.directory / "docs" / safe
 
-    def _save_source(self, doc_id: str, text: str, chunks: list[Chunk]) -> None:
+    def _save_source(self, doc_id: str, text: str, chunks: list[Chunk],
+                     pages: PageMap | None = None) -> None:
         d = self._doc_dir(doc_id)
         d.mkdir(parents=True, exist_ok=True)
         (d / "source.txt").write_text(text, encoding="utf-8")
+        # The page map is stored with the index, not re-read from wherever the
+        # document came from. An index that can only cite pages while the
+        # original file happens to still be on disk cites nothing in practice.
         (d / "chunks.json").write_text(json.dumps({
             "doc_id": doc_id,
             "embedding_model": self.embedder.model,
+            "pages": pages.to_json() if pages else None,
             "chunks": [{"ordinal": c.ordinal, "start": c.start, "end": c.end}
                        for c in chunks],
         }, indent=2), encoding="utf-8")
         self._sources[doc_id] = text
         self._chunks[doc_id] = chunks
+        self._pages[doc_id] = pages
 
     def _load_source(self, doc_id: str) -> tuple[str, list[Chunk]]:
         if doc_id in self._sources:
@@ -166,7 +187,13 @@ class _BaseRetriever:
                   for c in meta["chunks"]]
         self._sources[doc_id] = text
         self._chunks[doc_id] = chunks
+        self._pages[doc_id] = PageMap.from_json(meta.get("pages"))
         return text, chunks
+
+    def page_map(self, doc_id: str) -> PageMap | None:
+        if doc_id not in self._pages:
+            self._load_source(doc_id)
+        return self._pages.get(doc_id)
 
     def is_indexed(self, doc_id: str) -> bool:
         return (self._doc_dir(doc_id) / "source.txt").exists()
@@ -196,11 +223,12 @@ class _BaseRetriever:
         return self._to_passages(doc_id, [(int(i), s) for i, s in ranked],
                                  k, expand)
 
-    def _prepare(self, doc_id: str, text: str) -> tuple[list[Chunk], list[list[float]]]:
+    def _prepare(self, doc_id: str, text: str, pages: PageMap | None = None,
+                 ) -> tuple[list[Chunk], list[list[float]]]:
         kwargs = {"target_chars": self.target_chars} if self.target_chars else {}
         chunks = chunk_text(text, doc_id, **kwargs)
         vectors = self.embedder.embed([c.text for c in chunks]) if chunks else []
-        self._save_source(doc_id, text, chunks)
+        self._save_source(doc_id, text, chunks, pages)
         return chunks, vectors
 
     # ------------------------------------------------------------ expansion
@@ -222,6 +250,7 @@ class _BaseRetriever:
         if not chunks:
             return []
         by_ordinal = {c.ordinal: c for c in chunks}
+        pages = self._pages.get(doc_id)
 
         spans: list[tuple[int, int]] = []
         span_score: dict[tuple[int, int], float] = {}
@@ -251,7 +280,8 @@ class _BaseRetriever:
                         end=end,
                         score=max(span_score[sp] for sp in parts),
                         ordinals=tuple(sorted(
-                            {o for sp in parts for o in span_ordinals[sp]})))))
+                            {o for sp in parts for o in span_ordinals[sp]})),
+                        pages=pages.range_for(start, end) if pages else None)))
         passages.sort(key=lambda pair: pair[0])
         return [p for _, p in passages]
 
@@ -268,8 +298,9 @@ class MemoryRetriever(_BaseRetriever):
         super().__init__(*args, **kwargs)
         self._vectors: dict[str, dict[int, list[float]]] = {}
 
-    def index(self, doc_id: str, text: str) -> int:
-        chunks, vectors = self._prepare(doc_id, text)
+    def index(self, doc_id: str, text: str,
+              pages: PageMap | None = None) -> int:
+        chunks, vectors = self._prepare(doc_id, text, pages)
         self._vectors[doc_id] = {c.ordinal: v for c, v in zip(chunks, vectors)}
         return len(chunks)
 
@@ -336,8 +367,9 @@ class LanceRetriever(_BaseRetriever):
     def _table_name(doc_id: str) -> str:
         return re.sub(r"[^A-Za-z0-9_]", "_", doc_id)
 
-    def index(self, doc_id: str, text: str) -> int:
-        chunks, vectors = self._prepare(doc_id, text)
+    def index(self, doc_id: str, text: str,
+              pages: PageMap | None = None) -> int:
+        chunks, vectors = self._prepare(doc_id, text, pages)
         if not chunks:
             return 0
         from lancedb.index import FTS

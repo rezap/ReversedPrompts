@@ -9,6 +9,7 @@ from typing import Optional
 import typer
 
 from . import ingest, prompts, recover
+from .chunking import PageMap
 from .client import (DEFAULT_MODEL, ObedientClient, OpenAIClient,
                      UnknownModel, judge_is_independent, resolve_models)
 from .features import ALL_KEYS, extract
@@ -200,6 +201,18 @@ def run(
     if controls_only:
         gs = [g for g in gs if g.is_control]
 
+    # Judging against an absent gold prompt would compare the candidate with
+    # an empty string and report the result as a similarity score. Refused
+    # rather than defaulted: a pair set with no gold is the normal case when
+    # the prompt is what you are trying to find out.
+    missing = [g.id for g in gs if not g.has_gold]
+    if judge and missing:
+        raise typer.BadParameter(
+            f"{len(missing)} group(s) have no gold prompt to judge against "
+            f"({', '.join(missing[:5])}"
+            f"{', ...' if len(missing) > 5 else ''}). Re-run with --no-judge "
+            f"to score output fidelity only, or fill in 'target_prompt'.")
+
     cuts = recover.truncations(gs, excerpt_chars)
     if cuts:
         _warn_truncated(cuts, sum(len(g) for g in gs))
@@ -299,6 +312,166 @@ def run(
         typer.echo(f"\nwrote {out}")
 
 
+@app.command("ingest-pdf")
+def ingest_pdf(
+    inputs: pathlib.Path = typer.Option(..., help="directory of input PDFs"),
+    outputs: pathlib.Path = typer.Option(
+        ..., help="directory of output PDFs, matched to inputs by filename"),
+    corpus: pathlib.Path = typer.Option(
+        ..., help="where the extracted text goes, e.g. data/corpus/contracts"),
+    pairs_out: pathlib.Path = typer.Option(
+        ..., "--pairs-out", help="the .jsonl to write"),
+    category: str = typer.Option("fetch", help="fetch | summarize | reason"),
+    manifest: Optional[pathlib.Path] = typer.Option(
+        None, help="JSON keyed by filename stem, merged into each record "
+                   "(target_prompt, prompt_group, category, ...)"),
+    strip_furniture: bool = typer.Option(
+        True, help="drop running headers and footers from input documents"),
+    dehyphenate: bool = typer.Option(
+        True, help="rejoin words split across a line break"),
+) -> None:
+    """Extract input/output PDF pairs into a corpus and a pair file. No API.
+
+    Text-layer PDFs only. Everything it had to clean, and everything it could
+    not, is reported -- a badly extracted document and an unrecoverable prompt
+    both score low, and only the report tells them apart.
+    """
+    from . import pdfdoc
+
+    loaded = json.loads(manifest.read_text(encoding="utf-8")) if manifest else {}
+    try:
+        report = pdfdoc.build_pairs(
+            inputs, outputs, corpus, category=category, manifest=loaded,
+            strip_furniture=strip_furniture, dehyphenate=dehyphenate)
+    except pdfdoc.PdfUnavailable as e:
+        raise typer.BadParameter(str(e)) from None
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from None
+
+    if not report.built:
+        raise typer.BadParameter(
+            f"no input/output PDF pairs matched by filename between {inputs} "
+            f"and {outputs}")
+
+    lines = [json.dumps(b.record, ensure_ascii=False) for b in report.built]
+    pairs_out.parent.mkdir(parents=True, exist_ok=True)
+    pairs_out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    typer.echo(f"{len(report.built)} pair(s) -> {pairs_out}\n")
+    width = max(len(b.stem) for b in report.built)
+    for b in report.built:
+        d = b.input_extraction.diagnostics
+        typer.echo(f"  {b.stem:<{width}}  {d.pages:>4} pages  "
+                   f"{d.chars:>8} chars  "
+                   f"{d.lines_removed:>4} furniture lines cut  "
+                   f"{d.words_rejoined:>4} words rejoined")
+        # Printed, not just counted. Deciding whether the stripper ate a real
+        # clause is a judgement only the person who has the document can make,
+        # and they cannot make it from a number.
+        for line in d.furniture[:8]:
+            typer.echo(f"      cut: {line[:70]}")
+        if len(d.furniture) > 8:
+            typer.echo(f"      ... and {len(d.furniture) - 8} more "
+                       f"(full list in {b.stem}.txt.pages.json)")
+
+    # Unmatched files are the failure that looks like success: the run simply
+    # has fewer pairs in it than the user thinks.
+    for side, names in (("input", report.unmatched_inputs),
+                        ("output", report.unmatched_outputs)):
+        if names:
+            typer.echo(f"\nWARNING: {len(names)} {side} PDF(s) with no "
+                       f"counterpart, skipped: {', '.join(names[:10])}",
+                       err=True)
+
+    concerns = [(b.stem, c) for b in report.built for c in b.concerns]
+    if concerns:
+        typer.echo(f"\n{'!' * 78}", err=True)
+        typer.echo("EXTRACTION CONCERNS -- check these before trusting a "
+                   "score:", err=True)
+        for stem, concern in concerns:
+            typer.echo(f"  {stem}: {concern}", err=True)
+        typer.echo(f"{'!' * 78}", err=True)
+
+    typer.echo(f"\nNext: revprompt check --pairs {pairs_out}")
+    if all(not b.record["target_prompt"] for b in report.built):
+        typer.echo("No gold prompts were supplied, so prompt-match scoring is "
+                   "off for this set.\nRun with --no-judge; output fidelity "
+                   "still scores.")
+
+
+@app.command()
+def check(
+    pairs_path: pathlib.Path = typer.Option(ingest.DEFAULT_PAIRS, "--pairs"),
+) -> None:
+    """Verify a pair file: well-formed, resolvable, and not stale. No API.
+
+    The Odyssey set has its own integrity test; this is the version that runs
+    against any pair file, because a corpus that drifted out from under its
+    stored outputs produces scores that are wrong rather than absent.
+    """
+    import hashlib
+
+    records = [json.loads(ln) for ln in
+               pairs_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    problems: list[str] = []
+    seen: set[str] = set()
+
+    for r in records:
+        rid = r.get("id", "<no id>")
+        if not r.get("id"):
+            problems.append("a record has no id")
+        elif rid in seen:
+            problems.append(f"{rid}: duplicate id")
+        seen.add(rid)
+        for key in ("category", "input_ref"):
+            if not r.get(key):
+                problems.append(f"{rid}: missing {key!r}")
+        for key, digest in (("input_ref", "input_sha256"),
+                            ("output_ref", "output_sha256")):
+            ref = r.get(key)
+            if not ref:
+                continue
+            path = ingest.ROOT / ref
+            if not path.exists():
+                problems.append(f"{rid}: {key} {ref} does not exist")
+                continue
+            if r.get(digest):
+                actual = hashlib.sha256(
+                    path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+                if actual != r[digest]:
+                    problems.append(
+                        f"{rid}: {ref} has changed since the pair was built "
+                        f"({digest} does not match) -- the stored output may "
+                        f"no longer correspond to this text")
+
+    try:
+        groups_ = ingest.load_groups(pairs_path)
+    except (ValueError, KeyError) as e:
+        problems.append(f"could not load: {e}")
+        groups_ = []
+
+    if problems:
+        typer.echo(f"{len(problems)} problem(s):", err=True)
+        for p in problems:
+            typer.echo(f"  {p}", err=True)
+        raise typer.Exit(1)
+
+    pairs = [p for g in groups_ for p in g.pairs]
+    with_gold = sum(g.has_gold for g in groups_)
+    longest = max((len(p.input_text) for p in pairs), default=0)
+    typer.echo(f"{len(records)} pair(s), {len(groups_)} group(s), all "
+               f"well-formed and current")
+    typer.echo(f"  gold prompts     {with_gold}/{len(groups_)} group(s)"
+               + ("" if with_gold == len(groups_)
+                  else "   (prompt-match scoring needs --no-judge)"))
+    typer.echo(f"  longest input    {longest} chars"
+               + ("" if longest <= recover.EXCERPT_CHARS else
+                  f"   (over the {recover.EXCERPT_CHARS} excerpt cap; "
+                  f"run will warn)"))
+    typer.echo(f"  longest output   "
+               f"{max((len(p.output) for p in pairs), default=0)} chars")
+
+
 @app.command()
 def models(
     available: bool = typer.Option(False, "--available",
@@ -350,15 +523,31 @@ def index(
     real_embeddings: bool = typer.Option(
         True, help="use the API; --no-real-embeddings uses the offline double"),
     index_dir: pathlib.Path = typer.Option(None, help="where the index lives"),
+    pages: Optional[pathlib.Path] = typer.Option(
+        None, help="page map sidecar; defaults to <path>.pages.json if present"),
 ) -> None:
     """Build a retrieval index for one document. Spends a little on embeddings."""
     from . import retrieval
     r = _retriever(backend, index_dir or retrieval.DEFAULT_INDEX_DIR,
                    real_embeddings)
     text = path.read_text(encoding="utf-8")
-    n = r.index(doc_id, text)
+
+    # Picked up automatically, because the sidecar is what `ingest-pdf` writes
+    # and needing to remember a flag to get page citations means not getting
+    # them.
+    sidecar = pages or path.with_suffix(path.suffix + ".pages.json")
+    page_map = None
+    if sidecar.exists():
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+        page_map = PageMap.from_json(data.get("page_map", data))
+    elif pages:
+        raise typer.BadParameter(f"no page map at {pages}")
+
+    n = r.index(doc_id, text, page_map)
     typer.echo(f"indexed {doc_id}: {len(text)} chars -> {n} chunks "
                f"({r.embedder.model})")
+    if page_map:
+        typer.echo(f"  page map: {len(page_map)} pages, cited from {sidecar.name}")
     typer.echo(f"  cache: {r.embedder.hits} hit(s), {r.embedder.misses} miss(es)")
 
 
