@@ -430,6 +430,50 @@ def test_empty_override_is_ignored_rather_than_blanking_the_model():
     assert got["judge"] == DEFAULT_MODEL
 
 
+# --------------------------------------------------------- judge independence
+
+def test_a_judge_on_the_inducers_model_is_reported_as_not_independent():
+    from reversed_prompts.client import judge_is_independent
+    assert judge_is_independent({"inducer": "same", "judge": "same"}) is False
+
+
+def test_a_judge_on_its_own_model_is_reported_as_independent():
+    from reversed_prompts.client import judge_is_independent
+    assert judge_is_independent({"inducer": "one", "judge": "other"}) is True
+
+
+def test_independence_is_unknown_rather_than_false_without_per_role_models():
+    """The offline double plays every role and names none of them.
+
+    Recording False there would claim a shared judge we have no evidence for;
+    the honest answer is that the question does not apply.
+    """
+    from reversed_prompts.client import ObedientClient, judge_is_independent
+    assert judge_is_independent(getattr(ObedientClient(), "models", {})) is None
+
+
+def test_judge_model_selects_the_judge_alone_and_beats_model():
+    """--model is the shorthand for all four; --judge-model peels one back off."""
+    from reversed_prompts import cli
+    from reversed_prompts.client import resolve_models
+
+    seen = {}
+
+    class FakeClient:
+        def __init__(self, models=None, **kw):
+            seen.update(resolve_models(models, env={}))
+
+    cli.OpenAIClient, real = FakeClient, cli.OpenAIClient
+    try:
+        cli._client(simulate=False, model="broad", budget=None,
+                    judge_model="narrow")
+    finally:
+        cli.OpenAIClient = real
+
+    assert seen["judge"] == "narrow"
+    assert seen["inducer"] == seen["executor"] == "broad"
+
+
 # ----------------------------------------------------------------- encoding
 
 def test_every_file_read_and_write_declares_an_encoding():
