@@ -37,7 +37,11 @@ from .ingest import Pair, PromptGroup
 from .metrics import SCORING_VERSION, Scale, describe_gap, tier1
 from .similarity import MAX_JUDGE_ATTEMPTS, PromptScore, score_prompt
 
-EXCERPT_CHARS = 8092        # per document, in the producer and critic prompts
+# Per *input* document, in the producer and critic prompts. Characters, not
+# tokens -- roughly 8k tokens of English. Outputs are never truncated: they are
+# what the instruction has to be inferred from, and an instruction inferred
+# from half an answer describes half a task.
+EXCERPT_CHARS = 32_000
 NAIVE = "Answer the question about the document above."
 
 

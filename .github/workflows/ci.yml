@@ -55,6 +55,11 @@ jobs:
       - name: Confirm the pair file is not stale
         run: python tools/build_odyssey.py --check
 
+      # The generic version: refs resolve, digests match, groups are
+      # consistent. Runs against any pair file, including one built from PDFs.
+      - name: Check the pair file
+        run: revprompt check
+
       - name: Exercise the recovery loop offline
         run: |
           revprompt groups

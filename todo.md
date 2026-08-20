@@ -171,6 +171,45 @@ then select whole groups, and raise rather than truncate.
 
 ---
 
+## PR D — PDFs in, page citations out
+
+**Status: `[x]` done**
+
+Running the system against real work means PDFs on both sides, inputs possibly
+thousands of pages. Landed:
+
+- `pdfdoc.py` — text-layer extraction with the cleaning made explicit and
+  reported: running headers and footers stripped and **listed**, words rejoined
+  across line breaks, pages with no text layer named, and a concern raised when
+  stripping took a large share of the document.
+- Two heuristic bugs found by testing against a realistic fixture rather than
+  a uniform one, both of which **deleted body text**: repeated *long* lines were
+  treated as furniture (a warranty clause repeated at a page top is content),
+  and digit-blanking collapsed "Section 4. Obligations under clause 4" across
+  pages into one apparent running header. Furniture is now short lines only,
+  and digits are blanked only on short lines. Both are pinned by tests.
+- `chunking.PageMap` — offset → printed page number, binary-searched because a
+  thousand-page document does thousands of lookups. Kept beside the text, never
+  injected into it: a `[page 12]` marker would be read by the model *and*
+  counted by the scorer.
+- Retrieval carries the map through indexing and cites it:
+  `contract pp. 412-413 [88301:89740]`. Stored with the index, so citation does
+  not depend on the original file still being on disk.
+- `output_ref` — outputs live in files, so a document-length answer stays
+  readable and diffable.
+- `target_prompt` is now optional. When the prompt is what you are looking for
+  there is no gold to judge against; `run` refuses to judge rather than scoring
+  against an empty string, and says to use `--no-judge`.
+- `revprompt check` — the generic pair-file integrity check, in CI.
+- `EXCERPT_CHARS` 8092 → 32000. Outputs were already never truncated; a test
+  now pins that, since it is the property the whole design leans on.
+
+Still open: `--excerpt-chars` is a prefix, and a prefix of a 1000-page contract
+is the first 30 pages. That is what wiring retrieval into the producer fixes,
+below.
+
+---
+
 ## Retrieval phase B — unblocked; the measurement came back
 
 `run_retrieval_eval` on the full book, `text-embedding-3-small`, 698k chars →

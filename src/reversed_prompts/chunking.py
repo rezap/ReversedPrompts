@@ -12,6 +12,7 @@ no sentence boundary to use does a chunk get cut at an arbitrary character.
 """
 from __future__ import annotations
 
+import bisect
 import re
 from dataclasses import dataclass
 
@@ -38,6 +39,62 @@ class Chunk:
 
     def __len__(self) -> int:
         return self.end - self.start
+
+
+@dataclass(frozen=True)
+class PageMap:
+    """Which page of the original document each character offset fell on.
+
+    Kept beside the text rather than inside it. Writing `[page 412]` into the
+    text would be simpler and wrong twice over: the marker becomes part of what
+    the model reads and part of what Tier-1 scoring measures, so a page break
+    would change a word count, and the same marker would be indexed and
+    retrieved as though it were content.
+
+    `numbers` is the page number a reader would *see*, which is not always the
+    index: front matter is often numbered separately, and a report that starts
+    at "1" after six unnumbered pages should cite the number on the page.
+    """
+
+    spans: tuple[tuple[int, int], ...]
+    numbers: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.numbers and len(self.numbers) != len(self.spans):
+            raise ValueError(f"{len(self.numbers)} page numbers for "
+                             f"{len(self.spans)} pages")
+
+    def __len__(self) -> int:
+        return len(self.spans)
+
+    def label(self, index: int) -> int:
+        return self.numbers[index] if self.numbers else index + 1
+
+    def page_at(self, offset: int) -> int:
+        """The page an offset falls on. Binary search, because a thousand-page
+        document chunks into thousands of lookups and a linear scan each time
+        turns indexing into a quadratic."""
+        if not self.spans:
+            raise ValueError("empty page map")
+        starts = [s for s, _ in self.spans]
+        i = bisect.bisect_right(starts, offset) - 1
+        return self.label(max(i, 0))
+
+    def range_for(self, start: int, end: int) -> tuple[int, int]:
+        """First and last page a span touches. `end` is exclusive, so a span
+        ending exactly on a page boundary does not claim the next page."""
+        return self.page_at(start), self.page_at(max(end - 1, start))
+
+    def to_json(self) -> dict:
+        return {"spans": [list(s) for s in self.spans],
+                "numbers": list(self.numbers)}
+
+    @classmethod
+    def from_json(cls, data: dict | None) -> "PageMap | None":
+        if not data or not data.get("spans"):
+            return None
+        return cls(spans=tuple((int(a), int(b)) for a, b in data["spans"]),
+                   numbers=tuple(int(n) for n in data.get("numbers") or ()))
 
 
 def _units(text: str, limit: int) -> list[tuple[int, int]]:

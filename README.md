@@ -269,9 +269,13 @@ says so before it spends anything and writes `judge_independent: false` into the
 ### How much of the document the system sees
 
 The executor always gets the whole input. The producer and critic get the first
-`--excerpt-chars` of it, 8092 by default, because the producer sees *every* document in
-a group at once and that prompt would otherwise grow without bound as control sets get
-larger.
+`--excerpt-chars` of it, **32000 by default** — characters, not tokens, so roughly 8k
+tokens of English — because the producer sees *every* document in a group at once and that
+prompt would otherwise grow without bound as control sets get larger.
+
+**Outputs are never truncated**, whatever the cap. The instruction has to be inferred from
+the whole answer, and an instruction inferred from half an answer describes half a task.
+A test pins this.
 
 Nothing in the shipped set hits that cap, and a test asserts it. If a future input does,
 `run` prints a warning naming each cut input before spending anything — a low score on a
@@ -281,6 +285,47 @@ the prompt"*, and those must not be confused. Raise it with `--excerpt-chars N`.
 A cap is the wrong tool once inputs get genuinely long — the evidence for an output sits
 wherever it happens to be, and a prefix keeps the first N characters regardless. That is
 what retrieval is for.
+
+### Running it against your own PDFs
+
+Text-layer PDFs, matched by filename: `inputs/acme.pdf` goes with `outputs/acme.pdf`.
+
+```bash
+pip install -e '.[pdf]'                       # adds pypdf
+revprompt ingest-pdf --inputs pdfs/in --outputs pdfs/out \
+    --corpus data/corpus/contracts --pairs-out data/pairs/contracts.jsonl
+revprompt check --pairs data/pairs/contracts.jsonl
+revprompt run --no-judge --pairs data/pairs/contracts.jsonl
+```
+
+**`--no-judge` is the normal case here.** Prompt-match scoring compares the recovered
+prompt with a gold one, and if you had the gold prompt you would not be running this.
+`ingest-pdf` leaves `target_prompt` empty, `run` refuses to judge against nothing rather
+than scoring against an empty string, and output fidelity works regardless. Supply gold
+prompts through `--manifest` if you do have them.
+
+Extraction is not a neutral step and the tool does not pretend otherwise. Tier-1 fidelity
+is computed from the *shape* of text — word counts, sentence counts, list items, table
+rows — and the usual PDF artefacts corrupt exactly those. So `ingest-pdf`:
+
+- strips running headers and footers, **printing every line it removed** — repeats are
+  detected only near page edges, only on short lines, and digits are blanked only on short
+  lines, because "Section 4. Obligations under clause 4" is a heading and "Page 4 of 312"
+  is furniture, and one rule that catches both deletes the body of the document;
+- rejoins words split across a line break (`representa-\ntive`);
+- reports pages that yielded no text — a scan hiding inside a "text-layer" PDF is
+  invisible to the system otherwise;
+- raises a concern when it removed a large share of the document, since over-stripping is
+  the expensive direction. `--no-strip-furniture` turns it off.
+
+Outputs are written as separate files and referenced with `output_ref`, so a
+document-length answer stays readable and diffable instead of being a JSONL line. Page
+maps go in a `.pages.json` sidecar rather than as `[page 12]` markers in the text — a
+marker would be read by the model *and* counted by the scorer.
+
+`revprompt check` verifies a pair file: refs resolve, digests still match, groups are
+consistent. Run it after ingesting and in CI — a corpus that drifted out from under its
+stored outputs produces scores that are wrong rather than missing.
 
 ### Retrieval
 
@@ -292,6 +337,10 @@ pip install -e '.[rag]'                       # adds lancedb
 revprompt index odyssey data/source/odyssey-pg1727.txt
 revprompt retrieve odyssey "Antinous the ringleader of the suitors" --expand 1
 ```
+
+Indexing a document that came from a PDF picks up its `.pages.json` sidecar automatically,
+and retrieved passages then cite pages — `contract pp. 412-413 [88301:89740]` — because
+character offsets are exact and useless to someone holding a 900-page document.
 
 Hybrid: BM25 full-text and vector search, fused by reciprocal rank. Both are needed
 because the tasks span both ends — *"name the main antagonist"* turns on a rare token that
